@@ -386,7 +386,7 @@ if [ "$INSTALL_MIERU" = "yes" ]; then
     fi
 
     # Конфигурация Mieru с использованием подхваченного SOCKS5 порта
-    local action="ACTION_PROXY"
+    action="ACTION_PROXY"
     [ "$DEFAULT_ROUTING" = "direct" ] && action="ACTION_DIRECT"
 
     if [ ! -f "/etc/mieru/mita.json" ]; then
@@ -449,10 +449,10 @@ LimitNOFILE=65535
 WantedBy=multi-user.target
 EOF
 
-    local ipt_proto=$(echo "$MIERU_PROTO" | tr '[:upper:]' '[:lower:]')
+    ipt_proto=$(echo "$MIERU_PROTO" | tr '[:upper:]' '[:lower:]')
     if [[ "$MIERU_PORTS" =~ - ]]; then
-        local p_s=$(echo "$MIERU_PORTS" | cut -d'-' -f1)
-        local p_e=$(echo "$MIERU_PORTS" | cut -d'-' -f2)
+        p_s=$(echo "$MIERU_PORTS" | cut -d'-' -f1)
+        p_e=$(echo "$MIERU_PORTS" | cut -d'-' -f2)
         iptables -I INPUT 1 -p "$ipt_proto" --dport "${p_s}:${p_e}" -j ACCEPT 2>/dev/null || true
     else
         iptables -I INPUT 1 -p "$ipt_proto" --dport "$MIERU_PORTS" -j ACCEPT 2>/dev/null || true
