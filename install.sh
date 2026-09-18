@@ -373,7 +373,8 @@ fi
 if [ "$INSTALL_MIERU" = "yes" ]; then
     echo -e "${CYAN}==> Шаг 4: Установка и настройка Mieru (mita) с Anti-TSPU пресетом...${NC}"
     id -u mita &>/dev/null || useradd -r -s /usr/sbin/nologin mita 2>/dev/null || true
-    mkdir -p /etc/mieru /usr/local/bin
+    mkdir -p /etc/mita /usr/local/bin
+    ln -sfn /etc/mita /etc/mieru
 
     local_mita="/usr/local/bin/mita"
     mita_ver=$(curl -fsSL https://api.github.com/repos/enfein/mieru/releases/latest 2>/dev/null | jq -r '.tag_name' || echo "v3.37.0")
@@ -384,13 +385,14 @@ if [ "$INSTALL_MIERU" = "yes" ]; then
         curl -fsSL -o "$local_mita" "$mita_dl_url" 2>/dev/null || curl -fsSL -o "$local_mita" "https://github.com/enfein/mieru/releases/latest/download/mita-linux-amd64" 2>/dev/null || true
         chmod +x "$local_mita" 2>/dev/null || true
     fi
+    ln -sf /usr/local/bin/mita /usr/bin/mita 2>/dev/null || true
 
     # Конфигурация Mieru с использованием подхваченного SOCKS5 порта
-    action="ACTION_PROXY"
-    [ "$DEFAULT_ROUTING" = "direct" ] && action="ACTION_DIRECT"
+    action="PROXY"
+    [ "$DEFAULT_ROUTING" = "direct" ] && action="DIRECT"
 
-    if [ ! -f "/etc/mieru/mita.json" ]; then
-        cat << EOF > /etc/mieru/mita.json
+    if [ ! -f "/etc/mita/config.json" ]; then
+        cat << EOF > /etc/mita/config.json
 {
   "portBindings": [
     {
@@ -398,52 +400,99 @@ if [ "$INSTALL_MIERU" = "yes" ]; then
       "protocol": "${MIERU_PROTO}"
     }
   ],
+  "users": [
+    {
+      "name": "${MIERU_USER}",
+      "password": "${MIERU_PASS}",
+      "allowPrivateIP": true,
+      "allowLoopbackIP": true
+    }
+  ],
   "trafficPattern": {
     "unlockAll": true,
-    "tcpFragment": { "enable": true, "maxSleepMs": 15 },
-    "nonce": { "type": "NONCE_TYPE_PRINTABLE", "applyToAllUDPPacket": true, "minLen": 6, "maxLen": 8 },
-    "padding": { "maxMiddlePaddingLen": 64, "maxEndPaddingLen": 128 },
+    "tcpFragment": {
+      "enable": true,
+      "maxSleepMs": 15
+    },
+    "nonce": {
+      "type": "NONCE_TYPE_PRINTABLE",
+      "applyToAllUDPPacket": true,
+      "minLen": 6,
+      "maxLen": 8
+    },
+    "padding": {
+      "maxMiddlePaddingLen": 64,
+      "maxEndPaddingLen": 128
+    },
     "lowEntropy": {
       "mode": "${MIERU_ENTROPY_MODE}",
       "maskRotation": "${MIERU_MASK_ROTATION}"
     }
   },
-  "egress": {
-    "rules": [
-      { "dest": "IP_NETWORK_ALL", "action": "${action}", "proxy": "xray_socks" }
-    ],
-    "proxies": [
-      { "name": "xray_socks", "protocol": "PROTOCOL_SOCKS5", "ip": "127.0.0.1", "port": ${XRAY_SOCKS_PORT} }
-    ]
+  "loggingLevel": "INFO",
+  "mtu": 1400,
+  "dns": {
+    "dualStack": "PREFER_IPv4"
   },
-  "logging": { "level": "INFO" }
+  "egress": {
+    "proxies": [
+      {
+        "name": "xray_socks",
+        "protocol": "SOCKS5_PROXY_PROTOCOL",
+        "host": "127.0.0.1",
+        "port": ${XRAY_SOCKS_PORT}
+      }
+    ],
+    "rules": [
+      {
+        "ipRanges": [
+          "*"
+        ],
+        "domainNames": [
+          "*"
+        ],
+        "action": "${action}",
+        "proxyNames": [
+          "xray_socks"
+        ]
+      }
+    ]
+  }
 }
 EOF
     fi
 
-    mkdir -p /etc/mieru
-    if [ ! -f "/etc/mieru/user_store.json" ]; then
-        echo "{"$MIERU_USER": "$MIERU_PASS"}" > /etc/mieru/user_store.json
+    if [ ! -f "/etc/mita/users_db.json" ]; then
+        echo "{\"${MIERU_USER}\": \"${MIERU_PASS}\"}" > /etc/mita/users_db.json
     fi
-    echo "Mieru-Home" > /etc/mieru/tag.txt
+    echo "$SERVER_IP" > /etc/mita/server_ip.txt
+    echo "Mieru-Home" > /etc/mita/tag.txt
 
-    chown -R mita:mita /etc/mieru
-    chmod 664 /etc/mieru/mita.json /etc/mieru/user_store.json
+    chown -R mita:mita /etc/mita
+    chmod 664 /etc/mita/config.json /etc/mita/users_db.json 2>/dev/null || true
 
     cat << 'EOF' > /etc/systemd/system/mita.service
 [Unit]
-Description=Mieru Mita Server
-After=network.target network-online.target x-ui.service
+Description=Mieru proxy server
+After=network-online.target network.service networking.service NetworkManager.service systemd-networkd.service x-ui.service
 Wants=network-online.target
+StartLimitBurst=5
+StartLimitIntervalSec=60
 
 [Service]
-Type=simple
+Type=exec
 User=mita
 Group=mita
-ExecStart=/usr/local/bin/mita server run -c /etc/mieru/mita.json
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+Environment="MITA_LOG_NO_TIMESTAMP=true"
+Environment="MITA_CONFIG_JSON_FILE=/etc/mita/config.json"
+ExecStartPre=+/bin/mkdir -p /var/run/mita
+ExecStartPre=+/bin/chown -R mita:mita /var/run/mita
+ExecStartPre=+/bin/chmod 775 /var/run/mita
+ExecStart=/usr/local/bin/mita run
+Nice=-10
 Restart=on-failure
-RestartSec=3
-LimitNOFILE=65535
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
