@@ -1,0 +1,12 @@
+[Unit]
+Description=WDTT TPROXY to Xray
+After=network.target wdtt.service
+Wants=wdtt.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/wdtt-tproxy.sh
+
+[Install]
+WantedBy=multi-user.target
