@@ -376,15 +376,24 @@ if [ "$INSTALL_MIERU" = "yes" ]; then
     mkdir -p /etc/mita /usr/local/bin
     ln -sfn /etc/mita /etc/mieru
 
-    local_mita="/usr/local/bin/mita"
-    mita_ver=$(curl -fsSL https://api.github.com/repos/enfein/mieru/releases/latest 2>/dev/null | jq -r '.tag_name' || echo "v3.37.0")
-    [ -z "$mita_ver" ] && mita_ver="v3.37.0"
-    mita_dl_url="https://github.com/enfein/mieru/releases/download/${mita_ver}/mita_${mita_ver#v}_${MIERU_ARCH}"
+    mita_ver="3.37.0"
+    case "$ARCH" in
+        x86_64) DEB_ARCH="amd64" ;;
+        aarch64|arm64) DEB_ARCH="arm64" ;;
+        *) DEB_ARCH="amd64" ;;
+    esac
 
     if ! command -v mita &>/dev/null; then
-        curl -fsSL -o "$local_mita" "$mita_dl_url" 2>/dev/null || curl -fsSL -o "$local_mita" "https://github.com/enfein/mieru/releases/latest/download/mita-linux-amd64" 2>/dev/null || true
-        chmod +x "$local_mita" 2>/dev/null || true
+        curl -fsSL -o /tmp/mita.deb "https://github.com/enfein/mieru/releases/download/v${mita_ver}/mita_${mita_ver}_${DEB_ARCH}.deb" 2>/dev/null || true
+        if [ -s /tmp/mita.deb ]; then
+            dpkg -i /tmp/mita.deb 2>/dev/null || apt-get install -f -y 2>/dev/null || true
+            rm -f /tmp/mita.deb
+        else
+            curl -fsSL "https://github.com/enfein/mieru/releases/download/v${mita_ver}/mita_${mita_ver}_linux_${DEB_ARCH}.tar.gz" | tar -xz -C /usr/local/bin/ mita 2>/dev/null || true
+            chmod +x /usr/local/bin/mita 2>/dev/null || true
+        fi
     fi
+    ln -sf /usr/bin/mita /usr/local/bin/mita 2>/dev/null || true
     ln -sf /usr/local/bin/mita /usr/bin/mita 2>/dev/null || true
 
     # Конфигурация Mieru с использованием подхваченного SOCKS5 порта
