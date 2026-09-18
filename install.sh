@@ -533,30 +533,37 @@ fi
 echo -e "${CYAN}==> Шаг 5: Интеграция qwdtt / WDTT TPROXY...${NC}"
 cat << EOF > /usr/local/bin/wdtt-tproxy.sh
 #!/usr/bin/env bash
+set -e
 WAN_IF="${WAN_IF}"
 TPROXY_PORT="${XRAY_TPROXY_PORT}"
 
-ip rule del fwmark 1 lookup 100 2>/dev/null || true
-ip route del local 0.0.0.0/0 dev lo table 100 2>/dev/null || true
+# 1. Routing table 100
+ip rule show | grep -q "lookup 100" || ip rule add fwmark 1 table 100
+ip route show table 100 | grep -q "local default dev lo" || ip route add local 0.0.0.0/0 dev lo table 100
 
-ip rule add fwmark 1 lookup 100
-ip route add local 0.0.0.0/0 dev lo table 100
+# 2. iptables MANGLE rules
+iptables -t mangle -N WDTT_TPROXY 2>/dev/null || iptables -t mangle -F WDTT_TPROXY
 
-iptables -t mangle -D PREROUTING -i wdtt0 -j WDTT_TPROXY 2>/dev/null || true
-iptables -t mangle -D PREROUTING -i wdttraw0 -j WDTT_TPROXY 2>/dev/null || true
-iptables -t mangle -F WDTT_TPROXY 2>/dev/null || true
-iptables -t mangle -X WDTT_TPROXY 2>/dev/null || true
-
-iptables -t mangle -N WDTT_TPROXY
+# Exclude local/internal
+iptables -t mangle -A WDTT_TPROXY -d 10.66.0.0/16 -j RETURN
+iptables -t mangle -A WDTT_TPROXY -d 10.70.0.0/16 -j RETURN
 iptables -t mangle -A WDTT_TPROXY -d 127.0.0.0/8 -j RETURN
-iptables -t mangle -A WDTT_TPROXY -d 10.0.0.0/8 -j RETURN
-iptables -t mangle -A WDTT_TPROXY -d 172.16.0.0/12 -j RETURN
-iptables -t mangle -A WDTT_TPROXY -d 192.168.0.0/16 -j RETURN
-iptables -t mangle -A WDTT_TPROXY -p tcp -j TPROXY --on-port \${TPROXY_PORT} --tproxy-mark 1
-iptables -t mangle -A WDTT_TPROXY -p udp -j TPROXY --on-port \${TPROXY_PORT} --tproxy-mark 1
 
-iptables -t mangle -A PREROUTING -i wdtt0 -j WDTT_TPROXY
-iptables -t mangle -A PREROUTING -i wdttraw0 -j WDTT_TPROXY
+# TPROXY to 127.0.0.1
+iptables -t mangle -A WDTT_TPROXY -p tcp -j TPROXY --on-port \${TPROXY_PORT} --on-ip 127.0.0.1 --tproxy-mark 1
+iptables -t mangle -A WDTT_TPROXY -p udp -j TPROXY --on-port \${TPROXY_PORT} --on-ip 127.0.0.1 --tproxy-mark 1
+
+# Hook to PREROUTING
+iptables -t mangle -C PREROUTING -i wdtt0 -j WDTT_TPROXY 2>/dev/null || iptables -t mangle -I PREROUTING -i wdtt0 -j WDTT_TPROXY
+iptables -t mangle -C PREROUTING -i wdttraw0 -j WDTT_TPROXY 2>/dev/null || iptables -t mangle -I PREROUTING -i wdttraw0 -j WDTT_TPROXY
+
+# 3. Block external access from internet
+iptables -C INPUT -i \${WAN_IF} -p tcp --dport \${TPROXY_PORT} -j DROP 2>/dev/null || iptables -I INPUT -i \${WAN_IF} -p tcp --dport \${TPROXY_PORT} -j DROP
+iptables -C INPUT -i \${WAN_IF} -p udp --dport \${TPROXY_PORT} -j DROP 2>/dev/null || iptables -I INPUT -i \${WAN_IF} -p udp --dport \${TPROXY_PORT} -j DROP
+
+# 4. Remove direct MASQUERADE
+iptables -t nat -D POSTROUTING -s 10.66.0.0/16 -o \${WAN_IF} -m comment --comment WDTT_MANAGED -j MASQUERADE 2>/dev/null || true
+iptables -t nat -D POSTROUTING -s 10.70.0.0/16 -o \${WAN_IF} -m comment --comment WDTT_RAW_MANAGED -j MASQUERADE 2>/dev/null || true
 EOF
 chmod +x /usr/local/bin/wdtt-tproxy.sh
 
