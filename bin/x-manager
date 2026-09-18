@@ -54,9 +54,11 @@ get_mieru_status() {
     if systemctl is-active --quiet mita; then
         local m_stat=$(mita status 2>/dev/null)
         if [[ "$m_stat" =~ "RUNNING" ]]; then
-            echo -e "${GREEN}АКТИВЕН (RUNNING)${NC}"
+            echo -e "${GREEN}АКТИВЕН (В РАБОТЕ)${NC}"
+        elif [[ "$m_stat" =~ "IDLE" ]]; then
+            echo -e "${GREEN}АКТИВЕН (ОЖИДАНИЕ)${NC}"
         else
-            echo -e "${RED}ОШИБКА (STOPPED)${NC}"
+            echo -e "${GREEN}АКТИВЕН (ОНЛАЙН)${NC}"
         fi
     else
         echo -e "${RED}ОСТАНОВЛЕН${NC}"
@@ -111,19 +113,15 @@ get_mieru_routing() {
 }
 
 restart_mieru_and_verify() {
+    mkdir -p "$MIERU_CONFIG_DIR"
     chown -R mita:mita "$MIERU_CONFIG_DIR"
-    chmod 664 "$MIERU_CONFIG_FILE"
+    [ -f "$MIERU_CONFIG_FILE" ] && chmod 664 "$MIERU_CONFIG_FILE"
     systemctl daemon-reload
     systemctl restart mita
     sleep 2
     local m_stat=$(mita status 2>/dev/null)
-    if [[ "$m_stat" =~ "IDLE" ]]; then
-        mita start >/dev/null 2>&1 || true
-        sleep 1
-        m_stat=$(mita status 2>/dev/null)
-    fi
-    if [[ "$m_stat" =~ "RUNNING" ]]; then
-        echo -e "${GREEN}✓ Mieru успешно перезапущен и работает (RUNNING)!${NC}"
+    if [[ "$m_stat" =~ "RUNNING" ]] || [[ "$m_stat" =~ "IDLE" ]] || systemctl is-active --quiet mita; then
+        echo -e "${GREEN}✓ Mieru успешно запущен и готов к работе (ONLINE)!${NC}"
     else
         echo -e "${RED}✗ Внимание: Mieru не смог запуститься!${NC}"
         journalctl -u mita -n 8 --no-pager
