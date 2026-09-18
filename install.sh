@@ -480,7 +480,8 @@ EOF
     chown -R mita:mita /etc/mita
     chmod 664 /etc/mita/config.json /etc/mita/users_db.json 2>/dev/null || true
 
-    cat << 'EOF' > /etc/systemd/system/mita.service
+    which_mita=$(command -v mita || echo "/usr/bin/mita")
+    cat << EOF > /etc/systemd/system/mita.service
 [Unit]
 Description=Mieru proxy server
 After=network-online.target network.service networking.service NetworkManager.service systemd-networkd.service x-ui.service
@@ -498,13 +499,19 @@ Environment="MITA_CONFIG_JSON_FILE=/etc/mita/config.json"
 ExecStartPre=+/bin/mkdir -p /var/run/mita
 ExecStartPre=+/bin/chown -R mita:mita /var/run/mita
 ExecStartPre=+/bin/chmod 775 /var/run/mita
-ExecStart=/usr/local/bin/mita run
+ExecStart=${which_mita} run
 Nice=-10
 Restart=on-failure
 RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
+EOF
+
+    mkdir -p /etc/systemd/system/mita.service.d
+    cat << 'EOF' > /etc/systemd/system/mita.service.d/override.conf
+[Service]
+Environment="MITA_CONFIG_JSON_FILE=/etc/mita/config.json"
 EOF
 
     ipt_proto=$(echo "$MIERU_PROTO" | tr '[:upper:]' '[:lower:]')
