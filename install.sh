@@ -651,12 +651,30 @@ else
     echo -e "  ✓ WDTT маршрутизация: Прямой выход"
 fi
 
-# Настройка безопасности (Блокировка шлюзов извне)
+# Настройка безопасности (Блокировка шлюзов извне и открытие портов протоколов)
 echo -e "${CYAN}==> Шаг 6: Настройка сетевой безопасности...${NC}"
 iptables -I INPUT 1 -i "$WAN_IF" -p tcp --dport "${XRAY_TPROXY_PORT}" -j DROP 2>/dev/null || true
 iptables -I INPUT 1 -i "$WAN_IF" -p udp --dport "${XRAY_TPROXY_PORT}" -j DROP 2>/dev/null || true
 iptables -I INPUT 1 -i "$WAN_IF" -p tcp --dport "${XRAY_REDIRECT_PORT}" -j DROP 2>/dev/null || true
 echo -e "  ✓ Внутренние порты ядра Xray (${XRAY_TPROXY_PORT}, ${XRAY_REDIRECT_PORT}) защищены от внешнего доступа"
+
+if command -v wdtt >/dev/null 2>&1 || [ -f "/etc/systemd/system/wdtt.service" ] || [ -d "/etc/wdtt" ]; then
+    wdtt_p="56000"
+    [ -f "/etc/systemd/system/wdtt.service" ] && wdtt_p=$(grep -oP -- '(^|\s)-listen\s+[0-9.]+:\K[0-9]+' /etc/systemd/system/wdtt.service 2>/dev/null | head -n 1 || echo "56000")
+    iptables -C INPUT -p udp --dport "$wdtt_p" -m comment --comment "WDTT_MANAGED" -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -p udp --dport "$wdtt_p" -m comment --comment "WDTT_MANAGED" -j ACCEPT
+    iptables -C INPUT -p tcp --dport "$wdtt_p" -m comment --comment "WDTT_MANAGED" -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -p tcp --dport "$wdtt_p" -m comment --comment "WDTT_MANAGED" -j ACCEPT
+    iptables -C INPUT -p tcp --dport 56002 -m comment --comment "WDTT_MANAGED" -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -p tcp --dport 56002 -m comment --comment "WDTT_MANAGED" -j ACCEPT
+    iptables -C INPUT -p udp --dport 56002 -m comment --comment "WDTT_MANAGED" -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -p udp --dport 56002 -m comment --comment "WDTT_MANAGED" -j ACCEPT
+    iptables -C INPUT -p udp --dport 56003 -m comment --comment "WDTT_MANAGED" -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -p udp --dport 56003 -m comment --comment "WDTT_MANAGED" -j ACCEPT
+    echo -e "  ✓ Порты WDTT (:${wdtt_p}, :56002, :56003) открыты в фаерволе"
+fi
+
+if command -v csqtt >/dev/null 2>&1 || [ -f "/etc/systemd/system/csqtt.service" ] || [ -d "/etc/csqtt" ]; then
+    csqtt_p="37000"
+    [ -f "/etc/systemd/system/csqtt.service" ] && csqtt_p=$(grep -oP -- '--listen\s+0\.0\.0\.0:\K[0-9]+' /etc/systemd/system/csqtt.service 2>/dev/null | head -n 1 || echo "37000")
+    iptables -C INPUT -p udp --dport "$csqtt_p" -m comment --comment "CSQTT_MANAGED" -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -p udp --dport "$csqtt_p" -m comment --comment "CSQTT_MANAGED" -j ACCEPT
+    echo -e "  ✓ Порт VPN-туннеля CSQTT (:${csqtt_p}/UDP) открыт в фаерволе"
+fi
 
 # Установка диспетчера x-manager
 echo -e "${CYAN}==> Шаг 7: Развертывание диспетчера x-manager...${NC}"

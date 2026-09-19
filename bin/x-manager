@@ -642,6 +642,40 @@ unlock_all_protocols_fw() {
     sleep 2
 }
 
+sync_active_firewall_rules() {
+    if is_snell_installed && ! is_snell_fw_blocked; then
+        local sp=$(get_snell_port)
+        [ -n "$sp" ] && {
+            iptables -C INPUT -p tcp --dport "$sp" -m comment --comment "SNELL_MANAGED" -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport "$sp" -m comment --comment "SNELL_MANAGED" -j ACCEPT
+            iptables -C INPUT -p udp --dport "$sp" -m comment --comment "SNELL_MANAGED" -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport "$sp" -m comment --comment "SNELL_MANAGED" -j ACCEPT
+        }
+    fi
+    if is_mieru_installed && ! is_mieru_fw_blocked; then
+        local mp_str=$(get_mieru_ports)
+        local mp_val=$(echo "$mp_str" | cut -d'/' -f1)
+        local mp_pr=$(echo "$mp_str" | cut -d'/' -f2 | tr '[:upper:]' '[:lower:]')
+        [ -z "$mp_pr" ] && mp_pr="tcp"
+        local ipt_p=$(echo "$mp_val" | tr '-' ':')
+        if [ -n "$ipt_p" ]; then
+            iptables -C INPUT -p "$mp_pr" --dport "$ipt_p" -m comment --comment "MIERU_MANAGED" -j ACCEPT 2>/dev/null || iptables -I INPUT -p "$mp_pr" --dport "$ipt_p" -m comment --comment "MIERU_MANAGED" -j ACCEPT
+        fi
+    fi
+    if is_wdtt_installed && ! is_wdtt_fw_blocked; then
+        local wp=$(get_wdtt_peer_port)
+        [ -z "$wp" ] && wp="56000"
+        iptables -C INPUT -p udp --dport "$wp" -m comment --comment "WDTT_MANAGED" -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport "$wp" -m comment --comment "WDTT_MANAGED" -j ACCEPT
+        iptables -C INPUT -p tcp --dport "$wp" -m comment --comment "WDTT_MANAGED" -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport "$wp" -m comment --comment "WDTT_MANAGED" -j ACCEPT
+        iptables -C INPUT -p tcp --dport 56002 -m comment --comment "WDTT_MANAGED" -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport 56002 -m comment --comment "WDTT_MANAGED" -j ACCEPT
+        iptables -C INPUT -p udp --dport 56002 -m comment --comment "WDTT_MANAGED" -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport 56002 -m comment --comment "WDTT_MANAGED" -j ACCEPT
+        iptables -C INPUT -p udp --dport 56003 -m comment --comment "WDTT_MANAGED" -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport 56003 -m comment --comment "WDTT_MANAGED" -j ACCEPT
+    fi
+    if is_csqtt_installed && ! is_csqtt_tunnel_blocked; then
+        local cp=$(get_csqtt_peer_port)
+        [ -z "$cp" ] && cp="37000"
+        iptables -C INPUT -p udp --dport "$cp" -m comment --comment "CSQTT_MANAGED" -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport "$cp" -m comment --comment "CSQTT_MANAGED" -j ACCEPT
+    fi
+}
+
 menu_firewall() {
     while true; do
         clear
@@ -3007,6 +3041,9 @@ rescan_and_adopt_protocols() {
         echo -e "  ${RED}[✗] MasterDnsVPN${NC}:       Не установлен"
     fi
 
+    # Автоматическая синхронизация правил фаервола ACCEPT для активных протоколов
+    sync_active_firewall_rules
+
     local base_d=$(detect_base_domain)
     echo ""
     echo -e "  ${BOLD}Базовый домен сервера:${NC} ${GREEN}${base_d:-не определен}${NC}"
@@ -3083,6 +3120,7 @@ restart_all_services() {
     if is_dns_installed; then
         echo -e "DNS:   $(get_dns_status)"
     fi
+    sync_active_firewall_rules
     sleep 2
 }
 
@@ -3090,6 +3128,8 @@ restart_all_services() {
 # ГЛАВНОЕ МЕНЮ ДИСПЕТЧЕРА
 # ==============================================================================
 main_hub() {
+    sync_active_firewall_rules >/dev/null 2>&1 || true
+
     local invoked=$(basename "$0")
     if [ "$invoked" = "x-snell" ]; then
         menu_snell
