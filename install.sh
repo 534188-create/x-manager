@@ -422,14 +422,34 @@ if [ "$INSTALL_MIERU" = "yes" ]; then
     mkdir -p /etc/mita /usr/local/bin
     ln -sfn /etc/mita /etc/mieru
 
-    mita_ver="3.37.0"
+    echo -e "  -> Проверка последней доступной версии Mieru (mita) на GitHub..."
+    local latest_tag=$(curl -fsSL -I -o /dev/null -w '%{url_effective}' https://github.com/enfein/mieru/releases/latest 2>/dev/null | sed -e 's#.*/tag/##' -e 's#.*/tag/v##' -e 's#^v##')
+    if [ -z "$latest_tag" ] || [[ "$latest_tag" =~ "github.com" ]]; then
+        latest_tag=$(curl -fsSL https://api.github.com/repos/enfein/mieru/releases/latest 2>/dev/null | grep -o '"tag_name": *"[^"]*' | sed -e 's/"tag_name": *"//' -e 's/^v//')
+    fi
+    mita_ver="${latest_tag:-3.37.0}"
+    echo -e "  -> Актуальная версия Mieru: ${GREEN}v${mita_ver}${NC}"
+
     case "$ARCH" in
         x86_64) DEB_ARCH="amd64" ;;
         aarch64|arm64) DEB_ARCH="arm64" ;;
         *) DEB_ARCH="amd64" ;;
     esac
 
+    local need_download=false
     if ! command -v mita &>/dev/null; then
+        need_download=true
+    else
+        local cur_mita_ver=$(mita version 2>/dev/null | head -n1 | tr -d 'v[:space:]')
+        if [ "$cur_mita_ver" != "$mita_ver" ]; then
+            echo -e "  -> Обнаружена версия v${cur_mita_ver}. Обновляем до последней v${mita_ver}..."
+            need_download=true
+        else
+            echo -e "  ✓ Mieru уже установлен актуальной версии (v${cur_mita_ver})."
+        fi
+    fi
+
+    if $need_download; then
         echo -e "  -> Скачивание пакета Mieru v${mita_ver} с GitHub (~30 MB, подождите)..."
         if curl -fL --progress-bar -o /tmp/mita.deb "https://github.com/enfein/mieru/releases/download/v${mita_ver}/mita_${mita_ver}_${DEB_ARCH}.deb" || curl -fsSL -o /tmp/mita.deb "https://github.com/enfein/mieru/releases/download/v${mita_ver}/mita_${mita_ver}_${DEB_ARCH}.deb"; then
             if [ -s /tmp/mita.deb ]; then
@@ -438,7 +458,7 @@ if [ "$INSTALL_MIERU" = "yes" ]; then
                 rm -f /tmp/mita.deb
             fi
         fi
-        if ! command -v mita &>/dev/null; then
+        if ! command -v mita &>/dev/null || [ "$(mita version 2>/dev/null | head -n1 | tr -d 'v[:space:]')" != "$mita_ver" ]; then
             echo -e "  -> Резервный канал: скачивание архива tar.gz..."
             curl -fL --progress-bar "https://github.com/enfein/mieru/releases/download/v${mita_ver}/mita_${mita_ver}_linux_${DEB_ARCH}.tar.gz" | tar -xz -C /usr/local/bin/ mita 2>/dev/null || true
             chmod +x /usr/local/bin/mita 2>/dev/null || true

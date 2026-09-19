@@ -113,6 +113,15 @@ SERVER_IP=$(get_server_ip)
 # ------------------------------------------------------------------------------
 # Вспомогательные функции: MIERU
 # ------------------------------------------------------------------------------
+get_mieru_version() {
+    if command -v mita &>/dev/null; then
+        local v=$(mita version 2>/dev/null | head -n1 | tr -d 'v[:space:]')
+        [ -n "$v" ] && echo "$v" || echo "3.37.0"
+    else
+        echo "3.37.0"
+    fi
+}
+
 get_mieru_status() {
     if ! is_mieru_installed; then
         echo -e "${RED}НЕ УСТАНОВЛЕН${NC}"
@@ -747,8 +756,9 @@ menu_firewall() {
 # ==============================================================================
 show_mieru_header() {
     clear
+    local m_ver=$(get_mieru_version)
     echo -e "${CYAN}╔══════════════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║${BOLD}               РАЗДЕЛ: УПРАВЛЕНИЕ MIERU (mita v3.37.0)                 ${CYAN}║${NC}"
+    echo -e "${CYAN}║${BOLD}               РАЗДЕЛ: УПРАВЛЕНИЕ MIERU (mita v${m_ver})                 ${CYAN}║${NC}"
     echo -e "${CYAN}╠══════════════════════════════════════════════════════════════════════╣${NC}"
     echo -e "${CYAN}║${NC}  Сервер:     ${BOLD}${SERVER_IP}${NC}  |  Служба: $(get_mieru_status)"
     echo -e "${CYAN}║${NC}  Имя:        ${BOLD}$(get_mieru_tag)${NC}  |  Обфускация: $(get_mieru_preset)"
@@ -1146,6 +1156,45 @@ mieru_export_links() {
     read -p "Нажмите Enter для возврата..."
 }
 
+mieru_check_update() {
+    show_mieru_header
+    echo -e "${BOLD}--- Проверка обновлений Mieru (mita) с GitHub ---${NC}"
+    local cur_v=$(get_mieru_version)
+    echo -e "Текущая установленная версия: ${CYAN}v${cur_v}${NC}"
+    echo -e "${YELLOW}Опрос официального репозитория enfein/mieru...${NC}"
+    local latest_v=$(curl -fsSL -I -o /dev/null -w '%{url_effective}' https://github.com/enfein/mieru/releases/latest 2>/dev/null | sed -e 's#.*/tag/##' -e 's#.*/tag/v##' -e 's#^v##')
+    if [ -z "$latest_v" ] || [[ "$latest_v" =~ "github.com" ]]; then
+        latest_v=$(curl -fsSL https://api.github.com/repos/enfein/mieru/releases/latest 2>/dev/null | grep -o '"tag_name": *"[^"]*' | sed -e 's/"tag_name": *"//' -e 's/^v//')
+    fi
+    [ -z "$latest_v" ] && latest_v="$cur_v"
+
+    echo -e "Последняя версия на GitHub:   ${GREEN}v${latest_v}${NC}"
+    echo ""
+    if [ "$cur_v" = "$latest_v" ]; then
+        echo -e "${GREEN}✓ У вас уже установлена самая последняя версия Mieru (v${cur_v})!${NC}"
+        echo ""
+        read -p "Нажмите Enter для возврата..."
+        return
+    fi
+
+    read -p "Обновить Mieru с версии v${cur_v} до актуальной v${latest_v}? [Y/n]: " up_ch
+    [[ "$up_ch" =~ ^[nN]$ ]] && return
+
+    echo -e "${YELLOW}Скачивание и установка mita v${latest_v}...${NC}"
+    local arch_deb="amd64"
+    [ "$(uname -m)" = "aarch64" ] || [ "$(uname -m)" = "arm64" ] && arch_deb="arm64"
+    if curl -fL --progress-bar -o /tmp/mita_new.deb "https://github.com/enfein/mieru/releases/download/v${latest_v}/mita_${latest_v}_${arch_deb}.deb"; then
+        dpkg -i /tmp/mita_new.deb 2>/dev/null || apt-get install -f -y 2>/dev/null || true
+        rm -f /tmp/mita_new.deb
+    else
+        curl -fL --progress-bar "https://github.com/enfein/mieru/releases/download/v${latest_v}/mita_${latest_v}_linux_${arch_deb}.tar.gz" | tar -xz -C /usr/local/bin/ mita 2>/dev/null || true
+        chmod +x /usr/local/bin/mita 2>/dev/null || true
+    fi
+    restart_mieru_and_verify
+    echo -e "${GREEN}✓ Mieru успешно обновлен до версии v$(get_mieru_version)!${NC}"
+    sleep 2
+}
+
 menu_mieru() {
     if ! is_mieru_installed; then
         clear
@@ -1170,9 +1219,10 @@ menu_mieru() {
         echo -e "  ${YELLOW}[8]${NC} 📜 Живые логи службы (journalctl)"
         echo -e "  ${YELLOW}[9]${NC} 🔄 Перезапустить службу mita"
         echo -e "  ${YELLOW}[10]${NC} 🔒 ${BOLD}Управление доступом в фаерволе${NC} ($(get_mieru_fw_status))"
+        echo -e "  ${GREEN}${BOLD}[11]${NC} 🔄 ${BOLD}Проверить и обновить Mieru до последней версии с GitHub${NC}"
         echo -e "  ${YELLOW}[0]${NC} ⬅️  Назад в Главное Меню"
         echo ""
-        read -p "Выберите пункт [0-10]: " m_choice
+        read -p "Выберите пункт [0-11]: " m_choice
         case "$m_choice" in
             1)
                 show_mieru_header
@@ -1191,6 +1241,7 @@ menu_mieru() {
             8) journalctl -u mita -f -n 50 ;;
             9) restart_mieru_and_verify; sleep 2 ;;
             10) toggle_mieru_fw ;;
+            11) mieru_check_update ;;
             0) return ;;
             *) echo "Неверный выбор"; sleep 1 ;;
         esac
@@ -4142,7 +4193,7 @@ main_hub() {
         echo -e "${CYAN}║${NC}  Система: BBR: $(get_bbr_short_status)  |  Swap: $(get_swap_short_status)  |  F2B: $(get_f2b_short_status)"
         echo -e "${CYAN}║${NC}"
         if is_mieru_installed; then
-            echo -e "${CYAN}║${NC}  ${BOLD}[1] 🚀 Mieru (mita v3.37.0)${NC}   -> $(get_mieru_status)"
+            echo -e "${CYAN}║${NC}  ${BOLD}[1] 🚀 Mieru (mita v$(get_mieru_version))${NC}   -> $(get_mieru_status)"
             echo -e "${CYAN}║${NC}      Порты: ${BOLD}$(get_mieru_ports)${NC}  |  Фаервол: $(get_mieru_fw_status)"
             echo -e "${CYAN}║${NC}      Маршрут: $(get_mieru_routing)  |  Профиль: $(get_mieru_preset)"
         else
