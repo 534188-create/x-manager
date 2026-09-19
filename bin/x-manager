@@ -1507,6 +1507,36 @@ get_dns_status() {
     fi
 }
 
+detect_base_domain() {
+    local d=""
+    # 1. Check cert dirs in /root/cert
+    if [ -d "/root/cert" ]; then
+        d=$(find /root/cert -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | grep -v '^\.' | head -n 1)
+    fi
+    # 2. Check acme.sh ecc dirs
+    if [ -z "$d" ] && [ -d "/root/.acme.sh" ]; then
+        d=$(find /root/.acme.sh -mindepth 1 -maxdepth 1 -type d -name '*_ecc' -printf '%f\n' 2>/dev/null | sed 's/_ecc$//' | head -n 1)
+    fi
+    # 3. Check 3x-ui / xray config
+    if [ -z "$d" ]; then
+        d=$(grep -oP '"serverName":\s*"\K[^"]+' /usr/local/x-ui/bin/config.json /etc/xray/config.json 2>/dev/null | grep -v '127.0.0.1' | head -n 1)
+    fi
+    # 4. Check caddy
+    if [ -z "$d" ] && [ -f "/etc/caddy/Caddyfile" ]; then
+        d=$(grep -oP '^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}' /etc/caddy/Caddyfile 2>/dev/null | head -n 1)
+    fi
+    # 5. Check hostname if it is a valid domain
+    if [ -z "$d" ]; then
+        local hn=$(hostname -f 2>/dev/null)
+        if echo "$hn" | grep -qE '\.[a-zA-Z]{2,}$'; then
+            d="$hn"
+        fi
+    fi
+    # Strip any wildcard (*.), d. or whitespace
+    d=$(echo "$d" | sed -e 's/^\*\.//' -e 's/^d\.//' | tr -d '[:space:]')
+    echo "$d"
+}
+
 get_dns_domain() {
     local conf="$COTTEN_CONFIG_FILE"
     [ -f "$conf" ] || conf="$MASTERDNS_CONFIG_FILE"
@@ -1514,7 +1544,14 @@ get_dns_domain() {
     if [ -f "$conf" ]; then
         dom=$(grep -oP 'DOMAIN\s*=\s*\["\K[^"]+' "$conf" 2>/dev/null | head -n 1 || true)
     fi
-    [ -z "$dom" ] && dom="d.lesovoi.pro"
+    if [ -z "$dom" ]; then
+        local base_d=$(detect_base_domain)
+        if [ -n "$base_d" ]; then
+            dom="d.${base_d}"
+        else
+            dom="d.lesovoi.pro"
+        fi
+    fi
     echo "$dom"
 }
 
@@ -1809,12 +1846,22 @@ show_dns_profiles() {
 dns_change_domain() {
     clear
     local cur_dom=$(get_dns_domain)
+    local base_d=$(detect_base_domain)
+    local suggest="d.${base_d}"
+    [ -z "$base_d" ] && suggest="$cur_dom"
     echo -e "${BOLD}--- Смена домена DNS-зоны ---${NC}"
-    echo -e "Текущий домен: ${CYAN}${cur_dom}${NC}"
+    echo -e "Текущий домен туннеля:   ${CYAN}${cur_dom}${NC}"
+    [ -n "$base_d" ] && echo -e "Базовый домен сервера:    ${GREEN}${base_d}${NC} (предлагаемый: ${CYAN}${suggest}${NC})"
     echo ""
-    read -p "Введите новый домен (например, d.mydomain.com): " new_dom
+    read -p "Введите новый домен DNS-зоны [Enter для $suggest]: " new_dom
     new_dom=$(echo "$new_dom" | tr -d '[:space:]')
+    [ -z "$new_dom" ] && new_dom="$suggest"
     [ -z "$new_dom" ] && return
+
+    if [[ "$new_dom" != d.* ]]; then
+        new_dom="d.${new_dom}"
+        echo -e "${YELLOW}Автоматически добавлен префикс 'd.': ${new_dom}${NC}"
+    fi
 
     if [ -f "$COTTEN_CONFIG_FILE" ]; then
         sed -i 's/^DOMAIN\s*=.*/DOMAIN = ["'"$new_dom"'"]/' "$COTTEN_CONFIG_FILE"
@@ -1825,7 +1872,7 @@ dns_change_domain() {
 
     local cur_s=$(get_active_dns_engine)
     systemctl restart "$cur_s" 2>/dev/null || true
-    echo -e "${GREEN}✓ Домен успешно изменен на: ${new_dom}!${NC}"
+    echo -e "${GREEN}✓ Домен зоны успешно изменен на: ${new_dom}!${NC}"
     sleep 2
 }
 
@@ -1934,10 +1981,24 @@ install_cottendns() {
     echo -e "${CYAN}║${BOLD}    УСТАНОВКА COTTENDNS (WHITEDNS HIGH-SPEED DNS TUNNEL ENGINE)        ${CYAN}║${NC}"
     echo -e "${CYAN}╚══════════════════════════════════════════════════════════════════════╝${NC}"
     echo ""
+    local base_d=$(detect_base_domain)
     local cur_dom=$(get_dns_domain)
-    [ -z "$cur_dom" ] && cur_dom="d.lesovoi.pro"
+    if [ -z "$cur_dom" ] || [ "$cur_dom" = "d.lesovoi.pro" ]; then
+        if [ -n "$base_d" ]; then
+            cur_dom="d.${base_d}"
+        else
+            cur_dom="d.lesovoi.pro"
+        fi
+    fi
+    [ -n "$base_d" ] && echo -e "  Базовый домен сервера: ${GREEN}${base_d}${NC}"
     read -p "Введите домен DNS-зоны [по умолчанию $cur_dom]: " user_dom
-    [ -n "$user_dom" ] && cur_dom="$user_dom"
+    user_dom=$(echo "$user_dom" | tr -d '[:space:]')
+    [ -z "$user_dom" ] && user_dom="$cur_dom"
+    if [[ "$user_dom" != d.* ]]; then
+        user_dom="d.${user_dom}"
+        echo -e "  ${YELLOW}Автоматически добавлен префикс 'd.': ${user_dom}${NC}"
+    fi
+    cur_dom="$user_dom"
 
     local cur_key=$(get_dns_key)
     [ -z "$cur_key" ] && cur_key=$(openssl rand -hex 16 2>/dev/null || echo "a7125b5f3cc23e525123c677bc6d202e")
@@ -2061,10 +2122,24 @@ install_masterdns() {
     echo -e "${CYAN}║${BOLD}        УСТАНОВКА MASTERDNSVPN (АЛЬТЕРНАТИВНЫЙ DNS-ТУННЕЛЬ)            ${CYAN}║${NC}"
     echo -e "${CYAN}╚══════════════════════════════════════════════════════════════════════╝${NC}"
     echo ""
+    local base_d=$(detect_base_domain)
     local cur_dom=$(get_dns_domain)
-    [ -z "$cur_dom" ] && cur_dom="d.lesovoi.pro"
+    if [ -z "$cur_dom" ] || [ "$cur_dom" = "d.lesovoi.pro" ]; then
+        if [ -n "$base_d" ]; then
+            cur_dom="d.${base_d}"
+        else
+            cur_dom="d.lesovoi.pro"
+        fi
+    fi
+    [ -n "$base_d" ] && echo -e "  Базовый домен сервера: ${GREEN}${base_d}${NC}"
     read -p "Введите домен DNS-зоны [по умолчанию $cur_dom]: " user_dom
-    [ -n "$user_dom" ] && cur_dom="$user_dom"
+    user_dom=$(echo "$user_dom" | tr -d '[:space:]')
+    [ -z "$user_dom" ] && user_dom="$cur_dom"
+    if [[ "$user_dom" != d.* ]]; then
+        user_dom="d.${user_dom}"
+        echo -e "  ${YELLOW}Автоматически добавлен префикс 'd.': ${user_dom}${NC}"
+    fi
+    cur_dom="$user_dom"
 
     local cur_key=$(get_dns_key)
     [ -z "$cur_key" ] && cur_key=$(openssl rand -hex 16 2>/dev/null || echo "a7125b5f3cc23e525123c677bc6d202e")
@@ -2309,8 +2384,104 @@ menu_dns() {
 }
 
 # ==============================================================================
-# РАЗДЕЛ 5: ОБЩИЙ СТАТУС ВСЕХ СЛУЖБ
+# РАЗДЕЛ 5: ОБЩИЙ СТАТУС И ИНВЕНТАРИЗАЦИЯ ВСЕХ СЛУЖБ
 # ==============================================================================
+rescan_and_adopt_protocols() {
+    clear
+    echo -e "${CYAN}╔══════════════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${CYAN}║${BOLD}      ИНВЕНТАРИЗАЦИЯ И ПОДХВАТ УСТАНОВЛЕННЫХ ПРОТОКОЛОВ               ${CYAN}║${NC}"
+    echo -e "${CYAN}╚══════════════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    echo -e "${YELLOW}Сканирование системы на наличие установленных протоколов и служб...${NC}"
+    echo ""
+
+    systemctl daemon-reload 2>/dev/null || true
+
+    local count=0
+
+    # Snell
+    if is_snell_installed; then
+        [ ! -L "/usr/local/bin/x-snell" ] && ln -sf /usr/local/bin/x-manager /usr/local/bin/x-snell 2>/dev/null || true
+        echo -e "  ${GREEN}[✓] Snell v5${NC}:           Обнаружен! $(get_snell_status) | Порт: $(get_snell_port)"
+        ((count++))
+    else
+        echo -e "  ${RED}[✗] Snell v5${NC}:           Не установлен"
+    fi
+
+    # Mieru
+    if is_mieru_installed; then
+        [ ! -L "/usr/local/bin/x-mieru" ] && ln -sf /usr/local/bin/x-manager /usr/local/bin/x-mieru 2>/dev/null || true
+        echo -e "  ${GREEN}[✓] Mieru (mita)${NC}:       Обнаружен! $(get_mieru_status) | Порты: $(get_mieru_ports)"
+        ((count++))
+    else
+        echo -e "  ${RED}[✗] Mieru (mita)${NC}:       Не установлен"
+    fi
+
+    # WDTT
+    if is_wdtt_installed; then
+        [ ! -L "/usr/local/bin/x-wdtt" ] && ln -sf /usr/local/bin/x-manager /usr/local/bin/x-wdtt 2>/dev/null || true
+        [ ! -L "/usr/local/bin/x-qwdtt" ] && ln -sf /usr/local/bin/x-manager /usr/local/bin/x-qwdtt 2>/dev/null || true
+        echo -e "  ${GREEN}[✓] WDTT / qwdtt${NC}:       Обнаружен! $(get_wdtt_status) | Порты: 56000-56003"
+        ((count++))
+    else
+        echo -e "  ${RED}[✗] WDTT / qwdtt${NC}:       Не установлен"
+    fi
+
+    # CSQTT
+    if is_csqtt_installed; then
+        [ ! -L "/usr/local/bin/x-csqtt" ] && ln -sf /usr/local/bin/x-manager /usr/local/bin/x-csqtt 2>/dev/null || true
+        echo -e "  ${GREEN}[✓] CSQTT${NC}:              Обнаружен! $(get_csqtt_status) | Панель: :$(get_csqtt_web_port)"
+        ((count++))
+    else
+        echo -e "  ${RED}[✗] CSQTT${NC}:              Не установлен"
+    fi
+
+    # MasterDnsVPN adoption if binary is in /opt/masterdnsvpn
+    if [ ! -f "$MASTERDNS_BIN" ] && [ -d "/opt/masterdnsvpn" ]; then
+        local found_m=$(find /opt/masterdnsvpn -maxdepth 1 -type f -name "MasterDnsVPN_Server_Linux_*" 2>/dev/null | head -n 1)
+        if [ -n "$found_m" ] && [ -f "$found_m" ]; then
+            ln -sf "$found_m" "$MASTERDNS_BIN"
+            chmod +x "$MASTERDNS_BIN"
+            mkdir -p /etc/masterdns
+            [ ! -f "$MASTERDNS_CONFIG_FILE" ] && [ -f "/opt/masterdnsvpn/server_config.toml" ] && cp /opt/masterdnsvpn/server_config.toml "$MASTERDNS_CONFIG_FILE"
+            [ ! -f "$MASTERDNS_KEY_FILE" ] && [ -f "/opt/masterdnsvpn/encrypt_key.txt" ] && cp /opt/masterdnsvpn/encrypt_key.txt "$MASTERDNS_KEY_FILE"
+        fi
+    fi
+
+    # CottenDNS
+    if is_cottendns_installed; then
+        [ ! -L "/usr/local/bin/x-dns" ] && ln -sf /usr/local/bin/x-manager /usr/local/bin/x-dns 2>/dev/null || true
+        [ ! -L "/usr/local/bin/x-cottendns" ] && ln -sf /usr/local/bin/x-manager /usr/local/bin/x-cottendns 2>/dev/null || true
+        echo -e "  ${GREEN}[✓] CottenDNS${NC}:          Обнаружен! $(systemctl is-active cottendns 2>/dev/null || echo 'остановлен')"
+        ((count++))
+    else
+        echo -e "  ${RED}[✗] CottenDNS${NC}:          Не установлен"
+    fi
+
+    # MasterDnsVPN
+    if is_masterdns_installed; then
+        [ ! -L "/usr/local/bin/x-dns" ] && ln -sf /usr/local/bin/x-manager /usr/local/bin/x-dns 2>/dev/null || true
+        [ ! -L "/usr/local/bin/x-masterdns" ] && ln -sf /usr/local/bin/x-manager /usr/local/bin/x-masterdns 2>/dev/null || true
+        echo -e "  ${GREEN}[✓] MasterDnsVPN${NC}:       Обнаружен! $(systemctl is-active masterdns 2>/dev/null || echo 'остановлен')"
+        ((count++))
+    else
+        echo -e "  ${RED}[✗] MasterDnsVPN${NC}:       Не установлен"
+    fi
+
+    local base_d=$(detect_base_domain)
+    echo ""
+    echo -e "  ${BOLD}Базовый домен сервера:${NC} ${GREEN}${base_d:-не определен}${NC}"
+    if [ -n "$base_d" ]; then
+        echo -e "  ${BOLD}DNS-зона для туннелей:${NC} ${CYAN}d.${base_d}${NC}"
+    fi
+
+    echo ""
+    echo -e "${GREEN}✓ Протоколы подхвачены и зарегистрированы в x-manager (всего: ${count})${NC}"
+    echo -e "  Все статусы в Главном Меню синхронизированы."
+    echo ""
+    read -p "Нажмите Enter для возврата..."
+}
+
 view_global_status() {
     clear
     echo -e "${CYAN}╔══════════════════════════════════════════════════════════════════════╗${NC}"
@@ -2329,7 +2500,7 @@ view_global_status() {
         printf "  %-22s %-25b\n" "CSQTT (VPN Server):" "$(get_csqtt_status)"
     fi
     if is_dns_installed; then
-        printf "  %-22s %-25b [Зона :%s :53 | %b]\n" "DNS-Туннель:" "$(get_dns_status)" "$(get_dns_domain)" "$(get_dns_wan_status)"
+        printf "  %-22s %-25b [Зона: %s:53 | %b]\n" "DNS-Туннель:" "$(get_dns_status)" "$(get_dns_domain)" "$(get_dns_wan_status)"
     else
         printf "  %-22s %-25b\n" "DNS-Туннель:" "$(get_dns_status)"
     fi
@@ -2439,7 +2610,7 @@ main_hub() {
         echo -e "${CYAN}║${NC}"
         if is_dns_installed; then
             echo -e "${CYAN}║${NC}  ${BOLD}[5] 🌐 DNS-Туннель (WhiteDNS)${NC}  -> $(get_dns_status)"
-            echo -e "${CYAN}║${NC}      Домен: :${BOLD}$(get_dns_domain)${NC} (:53 UDP/TCP) | WAN: $(get_dns_wan_status)"
+            echo -e "${CYAN}║${NC}      Домен: ${BOLD}$(get_dns_domain)${NC} (:53 UDP/TCP) | WAN: $(get_dns_wan_status)"
             echo -e "${CYAN}║${NC}      Маршрут: $(get_dns_routing)"
         else
             echo -e "${CYAN}║${NC}  ${BOLD}[5] 🌐 DNS-Туннель (WhiteDNS)${NC}  -> ${RED}НЕ УСТАНОВЛЕН${NC}"
@@ -2454,9 +2625,10 @@ main_hub() {
         echo ""
         echo -e "  ${BOLD}[6]${NC} 📊 Сводный статус всех служб и портов сервера"
         echo -e "  ${BOLD}[7]${NC} 🔄 Перезапустить все сервисы (Mieru + Snell + WDTT + CSQTT + DNS)"
+        echo -e "  ${BOLD}[8]${NC} 🔍 ${BOLD}Пересканировать и подхватить протоколы${NC} (Автоопределение установленных служб)"
         echo -e "  ${BOLD}[0]${NC} 🚪 Выход"
         echo ""
-        read -p "Выберите раздел [0-7]: " top_choice
+        read -p "Выберите раздел [0-8]: " top_choice
         case "$top_choice" in
             1) menu_mieru ;;
             2) menu_snell ;;
@@ -2465,6 +2637,7 @@ main_hub() {
             5) menu_dns ;;
             6) view_global_status ;;
             7) restart_all_services ;;
+            8) rescan_and_adopt_protocols ;;
             0) clear; exit 0 ;;
             *) echo "Неверный выбор"; sleep 1 ;;
         esac
