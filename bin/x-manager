@@ -333,10 +333,10 @@ get_wdtt_password() {
 get_wdtt_peer_port() {
     local port=""
     if [ -f "$WDTT_SERVICE_FILE" ]; then
-        port=$(grep -oP -- '-listen\s+[0-9.]+:\K[0-9]+' "$WDTT_SERVICE_FILE" 2>/dev/null || true)
+        port=$(grep -oP -- '(^|\s)-listen\s+[0-9.]+:\K[0-9]+' "$WDTT_SERVICE_FILE" 2>/dev/null | head -n 1 || true)
     fi
     if [ -z "$port" ]; then
-        port=$(ss -ulpn 2>/dev/null | grep wdtt-server | awk '{print $4}' | awk -F: '{print $NF}' | grep -v '56001\|37001' | head -n 1 || true)
+        port=$(ss -ulpn 2>/dev/null | grep wdtt-server | awk '{print $4}' | awk -F: '{print $NF}' | grep -v '56001\|37001\|44001' | head -n 1 || true)
     fi
     if [ -z "$port" ]; then
         port="56000"

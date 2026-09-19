@@ -718,7 +718,7 @@ if [ "$INSTALL_MIERU" = "yes" ]; then
 fi
 if command -v wdtt >/dev/null 2>&1 || [ -f "/etc/systemd/system/wdtt.service" ] || [ -d "/etc/wdtt" ]; then
     wdtt_p="56000"
-    [ -f "/etc/systemd/system/wdtt.service" ] && wdtt_p=$(grep -oP -- '-listen\s+[0-9.]+:\K[0-9]+' /etc/systemd/system/wdtt.service 2>/dev/null || echo "56000")
+    [ -f "/etc/systemd/system/wdtt.service" ] && wdtt_p=$(grep -oP -- '(^|\s)-listen\s+[0-9.]+:\K[0-9]+' /etc/systemd/system/wdtt.service 2>/dev/null | head -n 1 || echo "56000")
     wdtt_pass="sad_534188_sad"
     [ -f "/etc/wdtt/main.password" ] && wdtt_pass=$(cat /etc/wdtt/main.password | tr -d '\r\n')
     prof_name="WDTT-${SERVER_IP}"
