@@ -570,16 +570,18 @@ chmod +x /usr/local/bin/wdtt-tproxy.sh
 cat << 'EOF' > /etc/systemd/system/wdtt-tproxy.service
 [Unit]
 Description=WDTT TPROXY Routing to Xray
+PartOf=wdtt.service
 After=network.target x-ui.service wdtt.service
-Wants=network.target
+Wants=wdtt.service
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/wdtt-tproxy.sh
 RemainAfterExit=yes
+ExecStartPre=/bin/sleep 2
+ExecStart=/usr/local/bin/wdtt-tproxy.sh
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=multi-user.target wdtt.service
 EOF
 
 if [ "$DEFAULT_ROUTING" = "xray" ]; then
