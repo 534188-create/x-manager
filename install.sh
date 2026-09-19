@@ -617,6 +617,9 @@ ln -sf /usr/local/bin/x-manager /usr/local/bin/x-mieru
 ln -sf /usr/local/bin/x-manager /usr/local/bin/x-wdtt
 ln -sf /usr/local/bin/x-manager /usr/local/bin/x-qwdtt
 ln -sf /usr/local/bin/x-manager /usr/local/bin/x-csqtt
+ln -sf /usr/local/bin/x-manager /usr/local/bin/x-dns
+ln -sf /usr/local/bin/x-manager /usr/local/bin/x-cottendns
+ln -sf /usr/local/bin/x-manager /usr/local/bin/x-masterdns
 
 echo ""
 echo -e "${GREEN}${BOLD}══════════════════════════════════════════════════════════════════════${NC}"
@@ -629,6 +632,7 @@ echo -e "  ${YELLOW}x-snell${NC}     - Раздел управления Snell v
 echo -e "  ${YELLOW}x-mieru${NC}     - Раздел управления Mieru"
 echo -e "  ${YELLOW}x-wdtt${NC}      - Раздел управления WDTT (qwdtt)"
 echo -e "  ${YELLOW}x-csqtt${NC}     - Раздел управления CSQTT (VPN & Защита веб-панели)"
+echo -e "  ${YELLOW}x-dns${NC}       - Раздел управления DNS-туннелями (CottenDNS / MasterDnsVPN)"
 echo ""
 echo -e "${BOLD}Шлюзы ядра Xray (подхваченные/настроенные):${NC}"
 echo -e "  • TPROXY:   127.0.0.1:${XRAY_TPROXY_PORT}"

@@ -38,11 +38,54 @@ CSQTT_ENV_FILE="/etc/csqtt/csqtt.env"
 CSQTT_LOCK_FILE="/etc/csqtt/ssh_only.lock"
 CSQTT_NET_UP="/usr/local/lib/csqtt/network-up.sh"
 CSQTT_SERVICE_FILE="/etc/systemd/system/csqtt.service"
+# Пути к файлам DNS-туннелей (CottenDNS / MasterDnsVPN)
+COTTEN_DIR="/etc/cottendns"
+COTTEN_BIN="/usr/local/bin/cottendns-server"
+COTTEN_CONFIG_FILE="/etc/cottendns/server_config.toml"
+COTTEN_KEY_FILE="/etc/cottendns/encrypt_key.txt"
+COTTEN_SERVICE="cottendns"
+
+MASTERDNS_DIR="/etc/masterdns"
+MASTERDNS_BIN="/usr/local/bin/masterdns-server"
+MASTERDNS_CONFIG_FILE="/etc/masterdns/server_config.toml"
+MASTERDNS_KEY_FILE="/etc/masterdns/encrypt_key.txt"
+MASTERDNS_SERVICE="masterdns"
+
+DNS_WAN_LOCK="/etc/x-manager/dns_wan_blocked.lock"
+
 
 WAN_IF=$(ip route show default 2>/dev/null | awk '{print $5}' | head -n 1)
 [ -z "$WAN_IF" ] && WAN_IF="ens3"
 
 IP_FILE="/etc/mita/server_ip.txt"
+
+
+# ------------------------------------------------------------------------------
+# Проверка наличия установленных сервисов (Dynamic Detection)
+# ------------------------------------------------------------------------------
+is_mieru_installed() {
+    command -v mita >/dev/null 2>&1 || [ -f "$MIERU_CONFIG_FILE" ] || [ -f "/etc/systemd/system/mita.service" ]
+}
+
+is_snell_installed() {
+    command -v snell-server >/dev/null 2>&1 || [ -f "$SNELL_CONFIG_FILE" ] || [ -f "/etc/systemd/system/snell.service" ]
+}
+
+is_wdtt_installed() {
+    command -v wdtt >/dev/null 2>&1 || [ -f "/etc/systemd/system/wdtt.service" ] || [ -d "$WDTT_DIR" ]
+}
+
+is_cottendns_installed() {
+    [ -f "$COTTEN_BIN" ] || [ -f "/etc/systemd/system/${COTTEN_SERVICE}.service" ] || [ -d "$COTTEN_DIR" ]
+}
+
+is_masterdns_installed() {
+    [ -f "$MASTERDNS_BIN" ] || [ -f "/etc/systemd/system/${MASTERDNS_SERVICE}.service" ] || [ -d "$MASTERDNS_DIR" ]
+}
+
+is_dns_installed() {
+    is_cottendns_installed || is_masterdns_installed
+}
 
 get_server_ip() {
     if [ -f "$IP_FILE" ]; then
@@ -60,6 +103,10 @@ SERVER_IP=$(get_server_ip)
 # Вспомогательные функции: MIERU
 # ------------------------------------------------------------------------------
 get_mieru_status() {
+    if ! is_mieru_installed; then
+        echo -e "${RED}НЕ УСТАНОВЛЕН${NC}"
+        return
+    fi
     if systemctl is-active --quiet mita; then
         local m_stat=$(mita status 2>/dev/null)
         if [[ "$m_stat" =~ "RUNNING" ]]; then
@@ -141,6 +188,10 @@ restart_mieru_and_verify() {
 # Вспомогательные функции: SNELL (v5.0.1)
 # ------------------------------------------------------------------------------
 get_snell_status() {
+    if ! is_snell_installed; then
+        echo -e "${RED}НЕ УСТАНОВЛЕН${NC}"
+        return
+    fi
     if systemctl is-active --quiet snell; then
         echo -e "${GREEN}АКТИВЕН (RUNNING)${NC}"
     else
@@ -257,6 +308,10 @@ restart_snell_and_verify() {
 # Вспомогательные функции: WDTT
 # ------------------------------------------------------------------------------
 get_wdtt_status() {
+    if ! is_wdtt_installed; then
+        echo -e "${RED}НЕ УСТАНОВЛЕН${NC}"
+        return
+    fi
     if systemctl is-active --quiet wdtt; then
         echo -e "${GREEN}АКТИВЕН (RUNNING)${NC}"
     else
@@ -697,6 +752,17 @@ mieru_export_links() {
 }
 
 menu_mieru() {
+    if ! is_mieru_installed; then
+        clear
+        echo -e "${YELLOW}╔══════════════════════════════════════════════════════════════════════╗${NC}"
+        echo -e "${YELLOW}║${BOLD}                     MIERU НЕ ОБНАРУЖЕН                               ${YELLOW}║${NC}"
+        echo -e "${YELLOW}╚══════════════════════════════════════════════════════════════════════╝${NC}"
+        echo ""
+        echo -e "${RED}Служба mita или исполняемый файл mita не найдены на данном сервере.${NC}"
+        echo ""
+        read -p "Нажмите Enter для возврата..."
+        return
+    fi
     while true; do
         show_mieru_header
         echo -e "  ${YELLOW}[1]${NC} 📊 Статус службы Mita (Mieru) и сокеты"
@@ -938,6 +1004,17 @@ snell_export_links() {
 }
 
 menu_snell() {
+    if ! is_snell_installed; then
+        clear
+        echo -e "${YELLOW}╔══════════════════════════════════════════════════════════════════════╗${NC}"
+        echo -e "${YELLOW}║${BOLD}                    SNELL v5 НЕ ОБНАРУЖЕН                             ${YELLOW}║${NC}"
+        echo -e "${YELLOW}╚══════════════════════════════════════════════════════════════════════╝${NC}"
+        echo ""
+        echo -e "${RED}Служба snell или бинарник snell-server не найдены на данном сервере.${NC}"
+        echo ""
+        read -p "Нажмите Enter для возврата..."
+        return
+    fi
     while true; do
         show_snell_header
         echo -e "  ${YELLOW}[1]${NC} 📊 Статус службы Snell и сокеты"
@@ -1038,6 +1115,17 @@ wdtt_view_devices() {
 }
 
 menu_wdtt() {
+    if ! is_wdtt_installed; then
+        clear
+        echo -e "${YELLOW}╔══════════════════════════════════════════════════════════════════════╗${NC}"
+        echo -e "${YELLOW}║${BOLD}                     WDTT НЕ ОБНАРУЖЕН                                ${YELLOW}║${NC}"
+        echo -e "${YELLOW}╚══════════════════════════════════════════════════════════════════════╝${NC}"
+        echo ""
+        echo -e "${RED}Служба wdtt или исполняемый файл wdtt не найдены на данном сервере.${NC}"
+        echo ""
+        read -p "Нажмите Enter для возврата..."
+        return
+    fi
     while true; do
         show_wdtt_header
         echo -e "  ${YELLOW}[1]${NC} 📊 Статус службы WDTT и активные сокеты"
@@ -1375,6 +1463,849 @@ menu_csqtt() {
 }
 
 # ==============================================================================
+
+# ==============================================================================
+# РАЗДЕЛ 5: DNS-ТУННЕЛИ (COTTENDNS / MASTERDNSVPN)
+# ==============================================================================
+
+get_active_dns_engine() {
+    if systemctl is-active --quiet "$COTTEN_SERVICE" 2>/dev/null; then
+        echo "cottendns"
+    elif systemctl is-active --quiet "$MASTERDNS_SERVICE" 2>/dev/null; then
+        echo "masterdns"
+    elif is_cottendns_installed; then
+        echo "cottendns"
+    else
+        echo "masterdns"
+    fi
+}
+
+get_dns_engine_name() {
+    local eng=$(get_active_dns_engine)
+    if [ "$eng" = "cottendns" ]; then
+        echo "CottenDNS (WhiteDNS Engine)"
+    else
+        echo "MasterDnsVPN (Alternative Engine)"
+    fi
+}
+
+get_dns_status() {
+    if ! is_dns_installed; then
+        echo -e "${RED}НЕ УСТАНОВЛЕН${NC}"
+        return
+    fi
+    local eng=$(get_active_dns_engine)
+    local s_name="CottenDNS"
+    [ "$eng" = "masterdns" ] && s_name="MasterDnsVPN"
+
+    if systemctl is-active --quiet "$eng" 2>/dev/null; then
+        echo -e "${GREEN}АКТИВЕН (${s_name})${NC}"
+    elif systemctl is-enabled --quiet "$eng" 2>/dev/null; then
+        echo -e "${YELLOW}ОСТАНОВЛЕН (${s_name})${NC}"
+    else
+        echo -e "${RED}ОСТАНОВЛЕН (${s_name})${NC}"
+    fi
+}
+
+get_dns_domain() {
+    local conf="$COTTEN_CONFIG_FILE"
+    [ -f "$conf" ] || conf="$MASTERDNS_CONFIG_FILE"
+    local dom=""
+    if [ -f "$conf" ]; then
+        dom=$(grep -oP 'DOMAIN\s*=\s*\["\K[^"]+' "$conf" 2>/dev/null | head -n 1 || true)
+    fi
+    [ -z "$dom" ] && dom="d.lesovoi.pro"
+    echo "$dom"
+}
+
+get_dns_key() {
+    local kf="$COTTEN_KEY_FILE"
+    [ -f "$kf" ] || kf="$MASTERDNS_KEY_FILE"
+    local k=""
+    [ -f "$kf" ] && k=$(cat "$kf" 2>/dev/null | tr -d '[:space:]' || true)
+    [ -z "$k" ] && k="a7125b5f3cc23e525123c677bc6d202e"
+    echo "$k"
+}
+
+get_dns_routing() {
+    local conf="$COTTEN_CONFIG_FILE"
+    [ -f "$conf" ] || conf="$MASTERDNS_CONFIG_FILE"
+    if grep -qi "USE_EXTERNAL_SOCKS5\s*=\s*true" "$conf" 2>/dev/null; then
+        echo -e "${GREEN}Маршрутизация Xray SOCKS5 (127.0.0.1:10808)${NC}"
+    else
+        echo -e "${YELLOW}Прямой выход (Direct)${NC}"
+    fi
+}
+
+is_dns_wan_blocked() {
+    [ -f "$DNS_WAN_LOCK" ] && return 0
+    if iptables -C INPUT -i "$WAN_IF" -p udp --dport 53 -m comment --comment "DNS_WAN_BLOCK" -j DROP 2>/dev/null; then
+        return 0
+    fi
+    if iptables -S INPUT 2>/dev/null | grep -E -- "-A INPUT.*-i (ens3|eth0|${WAN_IF}).*-p udp.*--dport 53.*-j DROP" >/dev/null 2>&1; then
+        return 0
+    fi
+    return 1
+}
+
+get_dns_wan_status() {
+    if ! is_dns_installed; then
+        echo -e "${RED}Не установлен${NC}"
+        return
+    fi
+    if is_dns_wan_blocked; then
+        echo -e "${RED}🔒 БЛОКИРОВАН В WAN (Только локально)${NC}"
+    else
+        echo -e "${GREEN}🟢 ВКЛЮЧЕН (Открыт для интернета)${NC}"
+    fi
+}
+
+toggle_dns_wan() {
+    echo ""
+    if is_dns_wan_blocked; then
+        echo -e "${YELLOW}Открытие доступа к DNS-туннелю из внешнего интернета (WAN)...${NC}"
+        iptables -D INPUT -i "$WAN_IF" -p udp --dport 53 -m comment --comment "DNS_WAN_BLOCK" -j DROP 2>/dev/null || true
+        iptables -D INPUT -i "$WAN_IF" -p tcp --dport 53 -m comment --comment "DNS_WAN_BLOCK" -j DROP 2>/dev/null || true
+        rm -f "$DNS_WAN_LOCK"
+        echo -e "${GREEN}✓ Доступ из WAN успешно ОТКРЫТ! Порт 53 UDP/TCP принимает подключения.${NC}"
+    else
+        echo -e "${YELLOW}Блокировка доступа к DNS-туннелю из внешнего интернета (WAN)...${NC}"
+        mkdir -p /etc/x-manager
+        touch "$DNS_WAN_LOCK"
+        iptables -D INPUT -i "$WAN_IF" -p udp --dport 53 -m comment --comment "DNS_WAN_BLOCK" -j DROP 2>/dev/null || true
+        iptables -D INPUT -i "$WAN_IF" -p tcp --dport 53 -m comment --comment "DNS_WAN_BLOCK" -j DROP 2>/dev/null || true
+        iptables -I INPUT 1 -i "$WAN_IF" -p udp --dport 53 -m comment --comment "DNS_WAN_BLOCK" -j DROP
+        iptables -I INPUT 1 -i "$WAN_IF" -p tcp --dport 53 -m comment --comment "DNS_WAN_BLOCK" -j DROP
+        echo -e "${GREEN}✓ Доступ из WAN успешно ЗАБЛОКИРОВАН! Трафик на порт 53 сбрасывается (DROP).${NC}"
+    fi
+    sleep 2
+}
+
+switch_dns_engine() {
+    echo ""
+    local active=$(get_active_dns_engine)
+    if [ "$active" = "cottendns" ]; then
+        if ! is_masterdns_installed; then
+            echo -e "${YELLOW}MasterDnsVPN еще не установлен на сервере.${NC}"
+            read -p "Желаете установить MasterDnsVPN прямо сейчас? [y/N]: " inst_ans
+            if [[ "$inst_ans" =~ ^[yYдД] ]]; then
+                install_masterdns
+            fi
+            return
+        fi
+        echo -e "${YELLOW}Переключение с CottenDNS на MasterDnsVPN...${NC}"
+        systemctl stop cottendns 2>/dev/null || true
+        systemctl disable cottendns 2>/dev/null || true
+        systemctl enable masterdns 2>/dev/null || true
+        systemctl restart masterdns
+        sleep 2
+        if systemctl is-active --quiet masterdns; then
+            echo -e "${GREEN}✓ Успешно активирован MasterDnsVPN на порту 53!${NC}"
+        else
+            echo -e "${RED}✗ Ошибка запуска MasterDnsVPN!${NC}"
+            journalctl -u masterdns -n 10 --no-pager
+        fi
+    else
+        if ! is_cottendns_installed; then
+            echo -e "${YELLOW}CottenDNS еще не установлен на сервере.${NC}"
+            read -p "Желаете установить CottenDNS (WhiteDNS Engine) прямо сейчас? [y/N]: " inst_ans
+            if [[ "$inst_ans" =~ ^[yYдД] ]]; then
+                install_cottendns
+            fi
+            return
+        fi
+        echo -e "${YELLOW}Переключение с MasterDnsVPN на CottenDNS (WhiteDNS Engine)...${NC}"
+        systemctl stop masterdns 2>/dev/null || true
+        systemctl disable masterdns 2>/dev/null || true
+        systemctl enable cottendns 2>/dev/null || true
+        systemctl restart cottendns
+        sleep 2
+        if systemctl is-active --quiet cottendns; then
+            echo -e "${GREEN}✓ Успешно активирован CottenDNS (WhiteDNS Engine) на порту 53!${NC}"
+        else
+            echo -e "${RED}✗ Ошибка запуска CottenDNS!${NC}"
+            journalctl -u cottendns -n 10 --no-pager
+        fi
+    fi
+    sleep 2
+}
+
+get_stormdns_link() {
+    local p_type="$1"
+    local p_domain="$2"
+    local p_key="$3"
+    local p_name="$4"
+    python3 - << PYEOF
+import json, base64
+
+domain = "${p_domain}"
+key = "${p_key}"
+name = "${p_name}"
+ptype = int("${p_type}")
+
+resolvers = "1.1.1.1\n1.0.0.1\n8.8.8.8\n8.8.4.4\n9.9.9.9\n77.88.8.8\n77.88.8.1\n77.88.8.2\n77.88.8.3\n77.88.8.7\n77.88.8.88"
+
+p = {
+    "schema": "whitedns.profile",
+    "version": 1,
+    "profile": {
+        "name": name,
+        "server": {
+            "domain": domain,
+            "encryption_key": key,
+            "encryption_method": 5
+        },
+        "resolvers": resolvers,
+        "resolver_balancing_strategy": 2,
+        "upload_compression_type": 0,
+        "download_compression_type": 0,
+        "rx_tx_workers": 4,
+        "tunnel_process_workers": 0,
+        "max_packets_per_batch": 8,
+        "arq_window_size": 600,
+        "arq_max_rto_seconds": 5
+    }
+}
+
+if ptype == 1:
+    p["profile"].update({
+        "packet_duplication_count": 4,
+        "setup_packet_duplication_count": 4,
+        "base_encode_data": True,
+        "min_upload_mtu": 28,
+        "max_upload_mtu": 200,
+        "min_download_mtu": 60,
+        "max_download_mtu": 900,
+        "arq_initial_rto_seconds": 2,
+        "ping_aggressive_interval_seconds": 0.05,
+        "ping_lazy_interval_seconds": 0.5,
+        "ping_cooldown_interval_seconds": 2,
+        "ping_cold_interval_seconds": 15
+    })
+elif ptype == 2:
+    p["profile"].update({
+        "packet_duplication_count": 2,
+        "setup_packet_duplication_count": 2,
+        "base_encode_data": False,
+        "min_upload_mtu": 38,
+        "max_upload_mtu": 150,
+        "min_download_mtu": 100,
+        "max_download_mtu": 500,
+        "arq_initial_rto_seconds": 1,
+        "ping_aggressive_interval_seconds": 0.1,
+        "ping_lazy_interval_seconds": 0.75,
+        "ping_cooldown_interval_seconds": 2,
+        "ping_cold_interval_seconds": 15
+    })
+elif ptype == 3:
+    p["profile"].update({
+        "packet_duplication_count": 1,
+        "setup_packet_duplication_count": 2,
+        "base_encode_data": False,
+        "min_upload_mtu": 38,
+        "max_upload_mtu": 150,
+        "min_download_mtu": 100,
+        "max_download_mtu": 500,
+        "arq_initial_rto_seconds": 1,
+        "ping_aggressive_interval_seconds": 0.1,
+        "ping_lazy_interval_seconds": 0.75,
+        "ping_cooldown_interval_seconds": 4,
+        "ping_cold_interval_seconds": 30
+    })
+
+raw = json.dumps(p, separators=(',', ':'))
+print("stormdns://" + base64.b64encode(raw.encode('utf-8')).decode('utf-8'))
+PYEOF
+}
+
+show_single_dns_profile() {
+    local ptype="$1"
+    local title="$2"
+    local desc="$3"
+    local dom=$(get_dns_domain)
+    local key=$(get_dns_key)
+    local pname="FP dns tunnel"
+    local link=$(get_stormdns_link "$ptype" "$dom" "$key" "$pname")
+
+    clear
+    echo -e "${CYAN}╔══════════════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${CYAN}║${BOLD}  $title  ${CYAN}║${NC}"
+    echo -e "${CYAN}╚══════════════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    echo -e "${BOLD}Параметры профиля:${NC}"
+    echo -e "  • Домен зоны:    ${CYAN}${dom}${NC}"
+    echo -e "  • Ключ:          ${GREEN}${key}${NC} (AES-256-GCM)"
+    echo -e "  • Особенности:   ${YELLOW}${desc}${NC}"
+    echo ""
+    echo -e "${BOLD}--- QR-код для сканирования в приложении WhiteDNS / StormDNS ---${NC}"
+    qrencode -t ANSI256 "$link" 2>/dev/null || qrencode -t UTF8 "$link" 2>/dev/null || echo "qrencode не смог отрендерить"
+    echo ""
+    echo -e "${BOLD}--- Ссылка для импорта (stormdns://) ---${NC}"
+    echo -e "${CYAN}${link}${NC}"
+    echo ""
+    read -p "Нажмите Enter для возврата..."
+}
+
+show_dns_profiles() {
+    local dom=$(get_dns_domain)
+    local key=$(get_dns_key)
+
+    while true; do
+        clear
+        echo -e "${CYAN}╔══════════════════════════════════════════════════════════════════════╗${NC}"
+        echo -e "${CYAN}║${BOLD}          ПРОФИЛИ ПОДКЛЮЧЕНИЯ WHITEDNS / STORMDNS                     ${CYAN}║${NC}"
+        echo -e "${CYAN}╠══════════════════════════════════════════════════════════════════════╣${NC}"
+        echo -e "${CYAN}║${NC}  Домен: ${BOLD}${dom}${NC}  |  Ключ: ${GREEN}${key:0:16}...${NC}  |  AES-256-GCM"
+        echo -e "${CYAN}╚══════════════════════════════════════════════════════════════════════╝${NC}"
+        echo ""
+        echo -e "  ${YELLOW}[1]${NC} 🛡️  ${BOLD}Профиль 1: «Жесткая цензура»${NC}"
+        echo "      (Дублирование x4, base32 кодирование, агрессивный пинг, безопасный MTU 28-200)"
+        echo ""
+        echo -e "  ${YELLOW}[2]${NC} ⚡ ${BOLD}Профиль 2: «Стандартный»${NC}"
+        echo "      (Дублирование x2, оптимальная скорость и низкая задержка, MTU 38-150)"
+        echo ""
+        echo -e "  ${YELLOW}[3]${NC} 🚀 ${BOLD}Профиль 3: «Мобильный / Скоростной»${NC}"
+        echo "      (Дублирование x1, энергосбережение батареи, увеличенные тайм-ауты ожидания)"
+        echo ""
+        echo -e "  ${YELLOW}[4]${NC} 📋 ${BOLD}Показать все 3 ссылки списком для копирования${NC}"
+        echo -e "  ${YELLOW}[0]${NC} ⬅️  Назад в меню DNS-туннелей"
+        echo ""
+        read -p "Выберите профиль [0-4]: " prof_choice
+        case "$prof_choice" in
+            1)
+                show_single_dns_profile 1 "ПРОФИЛЬ 1: ЖЕСТКАЯ ЦЕНЗУРА (MAX SURVIVAL)" "Дублирование x4, Base32, Пинг 50ms, MTU 28..200/60..900"
+                ;;
+            2)
+                show_single_dns_profile 2 "ПРОФИЛЬ 2: СТАНДАРТНЫЙ (BALANCED SPEED)" "Дублирование x2, Пинг 100ms, MTU 38..150/100..500"
+                ;;
+            3)
+                show_single_dns_profile 3 "ПРОФИЛЬ 3: МОБИЛЬНЫЙ / СКОРОСТНОЙ (LOW BATTERY)" "Дублирование x1, Пинг 100ms, Cooldown 4s, MTU 38..150/100..500"
+                ;;
+            4)
+                clear
+                echo -e "${CYAN}╔══════════════════════════════════════════════════════════════════════╗${NC}"
+                echo -e "${CYAN}║${BOLD}          ВСЕ 3 ПРОФИЛЯ ПОДКЛЮЧЕНИЯ ДЛЯ КОПИРОВАНИЯ                   ${CYAN}║${NC}"
+                echo -e "${CYAN}╚══════════════════════════════════════════════════════════════════════╝${NC}"
+                echo ""
+                echo -e "${YELLOW}${BOLD}1. Жесткая цензура:${NC}"
+                get_stormdns_link 1 "$dom" "$key" "FP dns tunnel [Жесткая цензура]"
+                echo ""
+                echo -e "${YELLOW}${BOLD}2. Стандартный:${NC}"
+                get_stormdns_link 2 "$dom" "$key" "FP dns tunnel [Стандартный]"
+                echo ""
+                echo -e "${YELLOW}${BOLD}3. Мобильный / Скоростной:${NC}"
+                get_stormdns_link 3 "$dom" "$key" "FP dns tunnel [Скоростной]"
+                echo ""
+                read -p "Нажмите Enter для возврата..."
+                ;;
+            0) return ;;
+        esac
+    done
+}
+
+dns_change_domain() {
+    clear
+    local cur_dom=$(get_dns_domain)
+    echo -e "${BOLD}--- Смена домена DNS-зоны ---${NC}"
+    echo -e "Текущий домен: ${CYAN}${cur_dom}${NC}"
+    echo ""
+    read -p "Введите новый домен (например, d.mydomain.com): " new_dom
+    new_dom=$(echo "$new_dom" | tr -d '[:space:]')
+    [ -z "$new_dom" ] && return
+
+    if [ -f "$COTTEN_CONFIG_FILE" ]; then
+        sed -i 's/^DOMAIN\s*=.*/DOMAIN = ["'"$new_dom"'"]/' "$COTTEN_CONFIG_FILE"
+    fi
+    if [ -f "$MASTERDNS_CONFIG_FILE" ]; then
+        sed -i 's/^DOMAIN\s*=.*/DOMAIN = ["'"$new_dom"'"]/' "$MASTERDNS_CONFIG_FILE"
+    fi
+
+    local cur_s=$(get_active_dns_engine)
+    systemctl restart "$cur_s" 2>/dev/null || true
+    echo -e "${GREEN}✓ Домен успешно изменен на: ${new_dom}!${NC}"
+    sleep 2
+}
+
+dns_change_key() {
+    clear
+    local cur_key=$(get_dns_key)
+    echo -e "${BOLD}--- Смена ключа шифрования (AES-256-GCM) ---${NC}"
+    echo -e "Текущий ключ: ${GREEN}${cur_key}${NC}"
+    echo ""
+    echo -e "  ${YELLOW}[1]${NC} Сгенерировать новый случайный ключ (32 hex)"
+    echo -e "  ${YELLOW}[2]${NC} Ввести свой 32-байтный hex-ключ"
+    echo -e "  ${YELLOW}[0]${NC} Отмена"
+    echo ""
+    read -p "Выберите вариант [0-2]: " k_choice
+    local new_key=""
+    case "$k_choice" in
+        1)
+            new_key=$(openssl rand -hex 16 2>/dev/null || echo "a7125b5f3cc23e525123c677bc6d202e")
+            ;;
+        2)
+            read -p "Введите hex ключ (32 символа): " custom_k
+            new_key=$(echo "$custom_k" | tr -d '[:space:]')
+            ;;
+        *) return ;;
+    esac
+
+    [ -z "$new_key" ] && return
+    mkdir -p "$COTTEN_DIR" "$MASTERDNS_DIR"
+    echo -n "$new_key" > "$COTTEN_KEY_FILE"
+    chmod 600 "$COTTEN_KEY_FILE"
+    echo -n "$new_key" > "$MASTERDNS_KEY_FILE"
+    chmod 600 "$MASTERDNS_KEY_FILE"
+
+    local cur_s=$(get_active_dns_engine)
+    systemctl restart "$cur_s" 2>/dev/null || true
+    echo -e "${GREEN}✓ Ключ шифрования успешно обновлен: ${new_key}${NC}"
+    sleep 2
+}
+
+dns_change_routing() {
+    clear
+    echo -e "${BOLD}--- Настройка маршрутизации DNS-туннеля ---${NC}"
+    echo -e "Текущий режим: $(get_dns_routing)"
+    echo ""
+    echo -e "  ${YELLOW}[1]${NC} 🌐 Маршрутизация Xray SOCKS5 (127.0.0.1:10808) ${GREEN}[Рекомендуется]${NC}"
+    echo -e "  ${YELLOW}[2]${NC} ⚡ Прямой выход (Direct)"
+    echo -e "  ${YELLOW}[0]${NC} Отмена"
+    echo ""
+    read -p "Выберите режим [0-2]: " r_choice
+    case "$r_choice" in
+        1)
+            for f in "$COTTEN_CONFIG_FILE" "$MASTERDNS_CONFIG_FILE"; do
+                if [ -f "$f" ]; then
+                    sed -i 's/^USE_EXTERNAL_SOCKS5\s*=.*/USE_EXTERNAL_SOCKS5 = true/' "$f"
+                    sed -i 's/^FORWARD_IP\s*=.*/FORWARD_IP = "127.0.0.1"/' "$f"
+                    sed -i 's/^FORWARD_PORT\s*=.*/FORWARD_PORT = 10808/' "$f"
+                fi
+            done
+            echo -e "${GREEN}✓ Маршрутизация установлена: Xray SOCKS5${NC}"
+            ;;
+        2)
+            for f in "$COTTEN_CONFIG_FILE" "$MASTERDNS_CONFIG_FILE"; do
+                if [ -f "$f" ]; then
+                    sed -i 's/^USE_EXTERNAL_SOCKS5\s*=.*/USE_EXTERNAL_SOCKS5 = false/' "$f"
+                fi
+            done
+            echo -e "${GREEN}✓ Маршрутизация установлена: Прямой выход (Direct)${NC}"
+            ;;
+        *) return ;;
+    esac
+
+    local cur_s=$(get_active_dns_engine)
+    systemctl restart "$cur_s" 2>/dev/null || true
+    sleep 2
+}
+
+menu_dns_settings() {
+    while true; do
+        clear
+        echo -e "${CYAN}╔══════════════════════════════════════════════════════════════════════╗${NC}"
+        echo -e "${CYAN}║${BOLD}                 НАСТРОЙКИ ПАРАМЕТРОВ DNS-ТУННЕЛЯ                      ${CYAN}║${NC}"
+        echo -e "${CYAN}╠══════════════════════════════════════════════════════════════════════╣${NC}"
+        echo -e "${CYAN}║${NC}  Домен зоны:  ${CYAN}${BOLD}$(get_dns_domain)${NC}"
+        echo -e "${CYAN}║${NC}  Ключ шифр.:  ${GREEN}$(get_dns_key)${NC} (AES-256-GCM)"
+        echo -e "${CYAN}║${NC}  Маршрут:     $(get_dns_routing)"
+        echo -e "${CYAN}╚══════════════════════════════════════════════════════════════════════╝${NC}"
+        echo ""
+        echo -e "  ${YELLOW}[1]${NC} 🌐 Сменить домен DNS-зоны"
+        echo -e "  ${YELLOW}[2]${NC} 🔑 Сменить / сгенерировать ключ шифрования"
+        echo -e "  ${YELLOW}[3]${NC} 🔀 Изменить маршрутизацию (Xray SOCKS5 / Direct)"
+        echo -e "  ${YELLOW}[0]${NC} ⬅️  Назад"
+        echo ""
+        read -p "Выберите пункт [0-3]: " s_choice
+        case "$s_choice" in
+            1) dns_change_domain ;;
+            2) dns_change_key ;;
+            3) dns_change_routing ;;
+            0) return ;;
+        esac
+    done
+}
+
+install_cottendns() {
+    clear
+    echo -e "${CYAN}╔══════════════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${CYAN}║${BOLD}    УСТАНОВКА COTTENDNS (WHITEDNS HIGH-SPEED DNS TUNNEL ENGINE)        ${CYAN}║${NC}"
+    echo -e "${CYAN}╚══════════════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    local cur_dom=$(get_dns_domain)
+    [ -z "$cur_dom" ] && cur_dom="d.lesovoi.pro"
+    read -p "Введите домен DNS-зоны [по умолчанию $cur_dom]: " user_dom
+    [ -n "$user_dom" ] && cur_dom="$user_dom"
+
+    local cur_key=$(get_dns_key)
+    [ -z "$cur_key" ] && cur_key=$(openssl rand -hex 16 2>/dev/null || echo "a7125b5f3cc23e525123c677bc6d202e")
+    read -p "Ключ шифрования (AES-256-GCM, 32 hex символа) [Enter для $cur_key]: " user_key
+    [ -n "$user_key" ] && cur_key="$user_key"
+
+    echo ""
+    echo -e "${YELLOW}Скачивание и установка CottenDNS...${NC}"
+    local arch=$(uname -m)
+    local pkg_arch="AMD64"
+    case "$arch" in
+        x86_64) pkg_arch="AMD64" ;;
+        aarch64|arm64) pkg_arch="ARM64" ;;
+        *) echo -e "${RED}Архитектура $arch не поддерживается автоматически.${NC}"; sleep 2; return ;;
+    esac
+
+    local tmp_dir=$(mktemp -d)
+    local dl_url="https://github.com/WhiteDNS/CottenDNS/releases/download/v2026.09.01.221444-530ffbf/CottenDns_Server_Linux_${pkg_arch}.tar.gz"
+    if ! curl -sL "$dl_url" -o "$tmp_dir/cotten.tar.gz"; then
+        echo -e "${RED}Ошибка скачивания с GitHub!${NC}"
+        rm -rf "$tmp_dir"
+        sleep 2
+        return
+    fi
+
+    tar -xzf "$tmp_dir/cotten.tar.gz" -C "$tmp_dir"
+    local bin_file=$(find "$tmp_dir" -type f -name "CottenDns_Server_Linux_*" | head -n 1)
+    if [ -z "$bin_file" ] || [ ! -f "$bin_file" ]; then
+        echo -e "${RED}Бинарник не найден в архиве!${NC}"
+        rm -rf "$tmp_dir"
+        sleep 2
+        return
+    fi
+
+    mkdir -p /etc/cottendns /usr/local/bin
+    cp "$bin_file" /usr/local/bin/cottendns-server
+    chmod +x /usr/local/bin/cottendns-server
+    echo -n "$cur_key" > /etc/cottendns/encrypt_key.txt
+    chmod 600 /etc/cottendns/encrypt_key.txt
+
+    cat << EOF > /etc/cottendns/server_config.toml
+DOMAIN = ["${cur_dom}"]
+PROTOCOL_TYPE = "SOCKS5"
+SUPPORTED_UPLOAD_COMPRESSION_TYPES = [0, 1, 2, 3]
+SUPPORTED_DOWNLOAD_COMPRESSION_TYPES = [0, 1, 2, 3]
+UDP_HOST = "0.0.0.0"
+UDP_PORT = 53
+TCP_LISTENER_ENABLED = true
+TCP_IPV6_ENABLED = false
+TCP_MAX_CONNS = 2048
+TCP_MAX_CONNS_PER_IP = 128
+TCP_MAX_QUERIES_PER_CONN = 0
+DOT_LISTENER_ENABLED = false
+DOH_LISTENER_ENABLED = false
+UDP_READERS = 4
+DNS_REQUEST_WORKERS = 4
+MAX_CONCURRENT_REQUESTS = 16384
+SOCKET_BUFFER_SIZE = 8388608
+MAX_PACKET_SIZE = 4096
+DROP_LOG_INTERVAL_SECONDS = 2.0
+DEFERRED_SESSION_WORKERS = 4
+DEFERRED_SESSION_QUEUE_LIMIT = 4096
+MAX_STREAMS_PER_SESSION = 4096
+MAX_ACTIVE_SESSIONS = 2048
+DNS_UPSTREAM_SERVERS = ["1.1.1.1:53", "8.8.8.8:53", "77.88.8.8:53"]
+DNS_UPSTREAM_TIMEOUT = 4.0
+DNS_CACHE_MAX_RECORDS = 50000
+DNS_CACHE_TTL_SECONDS = 300.0
+SOCKS_CONNECT_TIMEOUT = 120.0
+USE_EXTERNAL_SOCKS5 = true
+SOCKS5_AUTH = false
+FORWARD_IP = "127.0.0.1"
+FORWARD_PORT = 10808
+DATA_ENCRYPTION_METHOD = 5
+ENCRYPTION_AUTO_DETECT = true
+ENCRYPTION_KEY_FILE = "/etc/cottendns/encrypt_key.txt"
+LOG_LEVEL = "INFO"
+CONFIG_VERSION = "14"
+EOF
+
+    cat << EOF > /etc/systemd/system/cottendns.service
+[Unit]
+Description=CottenDNS High-Speed DNS Tunnel Server (WhiteDNS Engine)
+After=network.target xray.service
+Wants=xray.service
+
+[Service]
+Type=simple
+WorkingDirectory=/etc/cottendns
+ExecStart=/usr/local/bin/cottendns-server -config /etc/cottendns/server_config.toml
+Restart=always
+RestartSec=3
+LimitNOFILE=65535
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_ADMIN
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
+    systemctl stop masterdns 2>/dev/null || true
+    systemctl disable masterdns 2>/dev/null || true
+
+    systemctl enable cottendns
+    systemctl restart cottendns
+    rm -rf "$tmp_dir"
+    sleep 2
+
+    if systemctl is-active --quiet cottendns; then
+        echo -e "${GREEN}✓ CottenDNS успешно установлен и запущен на порту UDP/TCP 53!${NC}"
+    else
+        echo -e "${RED}✗ Ошибка запуска CottenDNS! Проверьте логи journalctl -u cottendns${NC}"
+    fi
+    sleep 2
+}
+
+install_masterdns() {
+    clear
+    echo -e "${CYAN}╔══════════════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${CYAN}║${BOLD}        УСТАНОВКА MASTERDNSVPN (АЛЬТЕРНАТИВНЫЙ DNS-ТУННЕЛЬ)            ${CYAN}║${NC}"
+    echo -e "${CYAN}╚══════════════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    local cur_dom=$(get_dns_domain)
+    [ -z "$cur_dom" ] && cur_dom="d.lesovoi.pro"
+    read -p "Введите домен DNS-зоны [по умолчанию $cur_dom]: " user_dom
+    [ -n "$user_dom" ] && cur_dom="$user_dom"
+
+    local cur_key=$(get_dns_key)
+    [ -z "$cur_key" ] && cur_key=$(openssl rand -hex 16 2>/dev/null || echo "a7125b5f3cc23e525123c677bc6d202e")
+    read -p "Ключ шифрования (AES-256-GCM, 32 hex символа) [Enter для $cur_key]: " user_key
+    [ -n "$user_key" ] && cur_key="$user_key"
+
+    echo ""
+    echo -e "${YELLOW}Скачивание и установка MasterDnsVPN...${NC}"
+    local arch=$(uname -m)
+    local pkg_arch="AMD64"
+    case "$arch" in
+        x86_64) pkg_arch="AMD64" ;;
+        aarch64|arm64) pkg_arch="ARM64" ;;
+        *) echo -e "${RED}Архитектура $arch не поддерживается автоматически.${NC}"; sleep 2; return ;;
+    esac
+
+    local tmp_dir=$(mktemp -d)
+    local dl_url="https://github.com/masterking32/MasterDnsVPN/releases/download/v2026.06.13.234407-7de2476/MasterDnsVPN_Server_Linux_${pkg_arch}.tar.gz"
+    if ! curl -sL "$dl_url" -o "$tmp_dir/master.tar.gz"; then
+        echo -e "${RED}Ошибка скачивания с GitHub!${NC}"
+        rm -rf "$tmp_dir"
+        sleep 2
+        return
+    fi
+
+    tar -xzf "$tmp_dir/master.tar.gz" -C "$tmp_dir"
+    local bin_file=$(find "$tmp_dir" -type f -name "MasterDnsVPN_Server_Linux_*" | head -n 1)
+    if [ -z "$bin_file" ] || [ ! -f "$bin_file" ]; then
+        echo -e "${RED}Бинарник не найден в архиве!${NC}"
+        rm -rf "$tmp_dir"
+        sleep 2
+        return
+    fi
+
+    mkdir -p /etc/masterdns /usr/local/bin
+    cp "$bin_file" /usr/local/bin/masterdns-server
+    chmod +x /usr/local/bin/masterdns-server
+    echo -n "$cur_key" > /etc/masterdns/encrypt_key.txt
+    chmod 600 /etc/masterdns/encrypt_key.txt
+
+    cat << EOF > /etc/masterdns/server_config.toml
+DOMAIN = ["${cur_dom}"]
+PROTOCOL_TYPE = "SOCKS5"
+UDP_HOST = "0.0.0.0"
+UDP_PORT = 53
+UDP_READERS = 4
+DNS_REQUEST_WORKERS = 4
+MAX_CONCURRENT_REQUESTS = 16384
+SOCKET_BUFFER_SIZE = 8388608
+MAX_PACKET_SIZE = 4096
+DNS_UPSTREAM_SERVERS = ["1.1.1.1:53", "8.8.8.8:53"]
+USE_EXTERNAL_SOCKS5 = true
+SOCKS5_AUTH = false
+FORWARD_IP = "127.0.0.1"
+FORWARD_PORT = 10808
+DATA_ENCRYPTION_METHOD = 5
+ENCRYPTION_KEY_FILE = "/etc/masterdns/encrypt_key.txt"
+LOG_LEVEL = "INFO"
+EOF
+
+    cat << EOF > /etc/systemd/system/masterdns.service
+[Unit]
+Description=MasterDnsVPN DNS Tunnel Server (Alternative Engine)
+After=network.target xray.service
+Wants=xray.service
+
+[Service]
+Type=simple
+WorkingDirectory=/etc/masterdns
+ExecStart=/usr/local/bin/masterdns-server -config /etc/masterdns/server_config.toml
+Restart=always
+RestartSec=3
+LimitNOFILE=65535
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_ADMIN
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
+    rm -rf "$tmp_dir"
+
+    if systemctl is-active --quiet cottendns; then
+        echo -e "${GREEN}✓ MasterDnsVPN успешно установлен как альтернативный движок.${NC}"
+        echo -e "  Так как сейчас активен CottenDNS, MasterDnsVPN находится в режиме ожидания."
+        echo -e "  Вы можете переключить активный движок в пункте [2] меню."
+    else
+        systemctl enable masterdns
+        systemctl restart masterdns
+        sleep 2
+        if systemctl is-active --quiet masterdns; then
+            echo -e "${GREEN}✓ MasterDnsVPN успешно установлен и запущен на порту UDP 53!${NC}"
+        else
+            echo -e "${RED}✗ Ошибка запуска MasterDnsVPN! Проверьте логи journalctl -u masterdns${NC}"
+        fi
+    fi
+    sleep 2
+}
+
+uninstall_dns() {
+    clear
+    echo -e "${RED}╔══════════════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${RED}║${BOLD}                     УДАЛЕНИЕ DNS-ТУННЕЛЯ                             ${RED}║${NC}"
+    echo -e "${RED}╚══════════════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    echo -e "  ${YELLOW}[1]${NC} Удалить только CottenDNS"
+    echo -e "  ${YELLOW}[2]${NC} Удалить только MasterDnsVPN"
+    echo -e "  ${YELLOW}[3]${NC} ${RED}${BOLD}Удалить ОБА сервиса и очистить конфигурации${NC}"
+    echo -e "  ${YELLOW}[0]${NC} Отмена"
+    echo ""
+    read -p "Выберите вариант [0-3]: " u_choice
+    case "$u_choice" in
+        1)
+            systemctl stop cottendns 2>/dev/null || true
+            systemctl disable cottendns 2>/dev/null || true
+            rm -f /etc/systemd/system/cottendns.service /usr/local/bin/cottendns-server
+            rm -rf /etc/cottendns
+            systemctl daemon-reload
+            echo -e "${GREEN}✓ CottenDNS удален.${NC}"
+            ;;
+        2)
+            systemctl stop masterdns 2>/dev/null || true
+            systemctl disable masterdns 2>/dev/null || true
+            rm -f /etc/systemd/system/masterdns.service /usr/local/bin/masterdns-server
+            rm -rf /etc/masterdns
+            systemctl daemon-reload
+            echo -e "${GREEN}✓ MasterDnsVPN удален.${NC}"
+            ;;
+        3)
+            systemctl stop cottendns masterdns 2>/dev/null || true
+            systemctl disable cottendns masterdns 2>/dev/null || true
+            rm -f /etc/systemd/system/cottendns.service /etc/systemd/system/masterdns.service
+            rm -f /usr/local/bin/cottendns-server /usr/local/bin/masterdns-server
+            rm -rf /etc/cottendns /etc/masterdns "$DNS_WAN_LOCK"
+            iptables -D INPUT -i "$WAN_IF" -p udp --dport 53 -m comment --comment "DNS_WAN_BLOCK" -j DROP 2>/dev/null || true
+            iptables -D INPUT -i "$WAN_IF" -p tcp --dport 53 -m comment --comment "DNS_WAN_BLOCK" -j DROP 2>/dev/null || true
+            systemctl daemon-reload
+            echo -e "${GREEN}✓ Все DNS-туннели удалены и настройки очищены.${NC}"
+            ;;
+        *) return ;;
+    esac
+    sleep 2
+}
+
+menu_dns_manage_engines() {
+    clear
+    echo -e "${CYAN}╔══════════════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${CYAN}║${BOLD}          УПРАВЛЕНИЕ УСТАНОВКОЙ И УДАЛЕНИЕМ ДВИЖКОВ DNS               ${CYAN}║${NC}"
+    echo -e "${CYAN}╚══════════════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    echo -e "  Статус CottenDNS:   $([ -f "$COTTEN_BIN" ] && echo -e "${GREEN}Установлен${NC}" || echo -e "${RED}Не установлен${NC}")"
+    echo -e "  Статус MasterDnsVPN: $([ -f "$MASTERDNS_BIN" ] && echo -e "${GREEN}Установлен${NC}" || echo -e "${RED}Не установлен${NC}")"
+    echo ""
+    echo -e "  ${YELLOW}[1]${NC} 🚀 Установить / Обновить CottenDNS (WhiteDNS Engine)"
+    echo -e "  ${YELLOW}[2]${NC} 🛡️  Установить / Обновить MasterDnsVPN (Alternative)"
+    echo -e "  ${YELLOW}[3]${NC} 🗑️  Удалить DNS-сервисы"
+    echo -e "  ${YELLOW}[0]${NC} ⬅️  Назад"
+    echo ""
+    read -p "Выберите вариант [0-3]: " eng_choice
+    case "$eng_choice" in
+        1) install_cottendns ;;
+        2) install_masterdns ;;
+        3) uninstall_dns ;;
+        0) return ;;
+    esac
+}
+
+show_dns_header() {
+    clear
+    local eng=$(get_active_dns_engine)
+    local eng_name=$(get_dns_engine_name)
+    local dom=$(get_dns_domain)
+    local key=$(get_dns_key)
+    echo -e "${CYAN}╔══════════════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${CYAN}║${BOLD}          УПРАВЛЕНИЕ DNS-ТУННЕЛЯМИ (COTTENDNS / MASTERDNSVPN)         ${CYAN}║${NC}"
+    echo -e "${CYAN}╠══════════════════════════════════════════════════════════════════════╣${NC}"
+    echo -e "${CYAN}║${NC}  Сервер: ${BOLD}${SERVER_IP}${NC}  |  Статус: $(get_dns_status)"
+    echo -e "${CYAN}║${NC}  Активный движок: ${BOLD}${eng_name}${NC}"
+    echo -e "${CYAN}║${NC}  Домен:  ${CYAN}${BOLD}${dom}${NC}  |  Порт: ${BOLD}:53 (UDP/TCP)${NC}"
+    echo -e "${CYAN}║${NC}  Доступ WAN: $(get_dns_wan_status)"
+    echo -e "${CYAN}║${NC}  Ключ:   ${GREEN}${key:0:16}...${NC}  |  Маршрут: $(get_dns_routing)"
+    echo -e "${CYAN}╚══════════════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+}
+
+menu_dns() {
+    if ! is_dns_installed; then
+        clear
+        echo -e "${YELLOW}╔══════════════════════════════════════════════════════════════════════╗${NC}"
+        echo -e "${YELLOW}║${BOLD}                 DNS-ТУННЕЛИ НЕ ОБНАРУЖЕНЫ                            ${YELLOW}║${NC}"
+        echo -e "${YELLOW}╚══════════════════════════════════════════════════════════════════════╝${NC}"
+        echo ""
+        echo -e "${RED}Ни CottenDNS, ни MasterDnsVPN не установлены на данном сервере.${NC}"
+        echo ""
+        echo -e "  ${YELLOW}[1]${NC} 🚀 ${BOLD}Установить CottenDNS${NC} (WhiteDNS Official Engine - Рекомендуется)"
+        echo -e "  ${YELLOW}[2]${NC} 🛡️  ${BOLD}Установить MasterDnsVPN${NC} (Альтернативный движок)"
+        echo -e "  ${YELLOW}[0]${NC} ⬅️  Назад в Главное Меню"
+        echo ""
+        read -p "Выберите пункт [0-2]: " d_choice
+        case "$d_choice" in
+            1) install_cottendns ;;
+            2) install_masterdns ;;
+            *) return ;;
+        esac
+        return
+    fi
+
+    while true; do
+        show_dns_header
+        echo -e "  ${YELLOW}[1]${NC} 📱 ${BOLD}Показать 3 профиля подключения${NC} (stormdns:// ссылки + QR-коды)"
+        echo -e "  ${YELLOW}[2]${NC} 🔄 ${BOLD}Переключить активный движок${NC} (CottenDNS <-> MasterDnsVPN)"
+        echo -e "  ${YELLOW}[3]${NC} 🔒 ${BOLD}Включить / Выключить доступ из WAN${NC} (Блокировка порта 53 через iptables)"
+        echo -e "  ${YELLOW}[4]${NC} ⚙️  ${BOLD}Настройки туннеля${NC} (Домен, Ключ, Маршрут Xray/Direct)"
+        echo -e "  ${YELLOW}[5]${NC} 📜 Живые логи службы (journalctl)"
+        echo -e "  ${YELLOW}[6]${NC} 🔄 Перезапустить DNS-службу"
+        echo -e "  ${YELLOW}[7]${NC} ➕ Установить второй движок / Удалить DNS-туннель"
+        echo -e "  ${YELLOW}[0]${NC} ⬅️  Назад в Главное Меню"
+        echo ""
+        read -p "Выберите пункт [0-7]: " top_d_choice
+        case "$top_d_choice" in
+            1) show_dns_profiles ;;
+            2) switch_dns_engine ;;
+            3) toggle_dns_wan ;;
+            4) menu_dns_settings ;;
+            5)
+                local cur_s=$(get_active_dns_engine)
+                journalctl -u "$cur_s" -f -n 50
+                ;;
+            6)
+                local cur_s=$(get_active_dns_engine)
+                echo -e "${YELLOW}Перезапуск службы $cur_s...${NC}"
+                systemctl restart "$cur_s"
+                sleep 2
+                echo -e "${GREEN}✓ Служба $cur_s перезапущена${NC}"
+                sleep 1
+                ;;
+            7) menu_dns_manage_engines ;;
+            0) return ;;
+        esac
+    done
+}
+
+# ==============================================================================
 # РАЗДЕЛ 5: ОБЩИЙ СТАТУС ВСЕХ СЛУЖБ
 # ==============================================================================
 view_global_status() {
@@ -1394,6 +2325,11 @@ view_global_status() {
     else
         printf "  %-22s %-25b\n" "CSQTT (VPN Server):" "$(get_csqtt_status)"
     fi
+    if is_dns_installed; then
+        printf "  %-22s %-25b [Зона :%s :53 | %b]\n" "DNS-Туннель:" "$(get_dns_status)" "$(get_dns_domain)" "$(get_dns_wan_status)"
+    else
+        printf "  %-22s %-25b\n" "DNS-Туннель:" "$(get_dns_status)"
+    fi
     printf "  %-22s %s\n" "Xray Core (3X-UI):" "$(systemctl is-active x-ui 2>/dev/null || echo 'inactive')"
     echo ""
     echo -e "${BOLD}--- Внутренние шлюзы ядра Xray (Вход для прокси-служб) ---${NC}"
@@ -1403,22 +2339,26 @@ view_global_status() {
     echo ""
     echo -e "${BOLD}--- Открытые прослушиваемые порты ---${NC}"
     echo -e "${YELLOW}TCP порты:${NC}"
-    ss -tlpn | grep -E 'mita|snell|xray|wdtt|csqtt|sshd' | awk '{printf "  %-6s %-22s %-25s\n", $1, $4, $NF}'
+    ss -tlpn | grep -E 'mita|snell|xray|wdtt|csqtt|cottendns|masterdns|sshd' | awk '{printf "  %-6s %-22s %-25s\n", $1, $4, $NF}'
     echo ""
     echo -e "${YELLOW}UDP порты:${NC}"
-    ss -ulpn | grep -E 'mita|snell|xray|wdtt|csqtt' | head -n 16 | awk '{printf "  %-6s %-22s %-25s\n", $1, $4, $NF}'
+    ss -ulpn | grep -E 'mita|snell|xray|wdtt|csqtt|cottendns|masterdns' | head -n 16 | awk '{printf "  %-6s %-22s %-25s\n", $1, $4, $NF}'
     echo ""
     read -p "Нажмите Enter для возврата..."
 }
 
 restart_all_services() {
     clear
-    echo -e "${YELLOW}Перезапуск всех прокси и VPN служб (Mieru, Snell, WDTT, CSQTT)...${NC}"
+    echo -e "${YELLOW}Перезапуск всех сетевых служб (Mieru, Snell, WDTT, CSQTT, DNS)...${NC}"
     systemctl restart mita 2>/dev/null || true
     systemctl restart snell 2>/dev/null || true
     systemctl restart wdtt 2>/dev/null || true
     if is_csqtt_installed; then
         systemctl restart csqtt 2>/dev/null || true
+    fi
+    if is_dns_installed; then
+        local cur_dns=$(get_active_dns_engine)
+        systemctl restart "$cur_dns" 2>/dev/null || true
     fi
     sleep 2
     echo -e "Mieru: $(get_mieru_status)"
@@ -1426,6 +2366,9 @@ restart_all_services() {
     echo -e "WDTT:  $(get_wdtt_status)"
     if is_csqtt_installed; then
         echo -e "CSQTT: $(get_csqtt_status)"
+    fi
+    if is_dns_installed; then
+        echo -e "DNS:   $(get_dns_status)"
     fi
     sleep 2
 }
@@ -1447,6 +2390,9 @@ main_hub() {
     elif [ "$invoked" = "x-csqtt" ]; then
         menu_csqtt
         exit 0
+    elif [ "$invoked" = "x-dns" ] || [ "$invoked" = "x-cottendns" ] || [ "$invoked" = "x-masterdns" ]; then
+        menu_dns
+        exit 0
     fi
 
     while true; do
@@ -1456,17 +2402,29 @@ main_hub() {
         echo -e "${CYAN}╠══════════════════════════════════════════════════════════════════════╣${NC}"
         echo -e "${CYAN}║${NC}  Сервер: ${BOLD}${SERVER_IP}${NC}  |  Шлюзы: TPROXY :12345 [127.0.0.1] | SOCKS5 :10808 [127.0.0.1] 🔒"
         echo -e "${CYAN}║${NC}"
-        echo -e "${CYAN}║${NC}  ${BOLD}[1] 🚀 Mieru (mita v3.37.0)${NC}   -> $(get_mieru_status)"
-        echo -e "${CYAN}║${NC}      Порты: ${BOLD}$(get_mieru_ports)${NC}  |  Профиль: $(get_mieru_preset)"
-        echo -e "${CYAN}║${NC}      Маршрут: $(get_mieru_routing)"
+        if is_mieru_installed; then
+            echo -e "${CYAN}║${NC}  ${BOLD}[1] 🚀 Mieru (mita v3.37.0)${NC}   -> $(get_mieru_status)"
+            echo -e "${CYAN}║${NC}      Порты: ${BOLD}$(get_mieru_ports)${NC}  |  Профиль: $(get_mieru_preset)"
+            echo -e "${CYAN}║${NC}      Маршрут: $(get_mieru_routing)"
+        else
+            echo -e "${CYAN}║${NC}  ${BOLD}[1] 🚀 Mieru (mita)${NC}           -> ${RED}НЕ УСТАНОВЛЕН${NC}"
+        fi
         echo -e "${CYAN}║${NC}"
-        echo -e "${CYAN}║${NC}  ${BOLD}[2] ⚡ Snell (v5.0.1)${NC}         -> $(get_snell_status)"
-        echo -e "${CYAN}║${NC}      Порт:  ${BOLD}$(get_snell_port)${NC} (TCP+UDP QUIC) |  Обфускация: $(get_snell_obfs)"
-        echo -e "${CYAN}║${NC}      Маршрут: $(get_snell_routing)"
+        if is_snell_installed; then
+            echo -e "${CYAN}║${NC}  ${BOLD}[2] ⚡ Snell (v5.0.1)${NC}         -> $(get_snell_status)"
+            echo -e "${CYAN}║${NC}      Порт:  ${BOLD}$(get_snell_port)${NC} (TCP+UDP QUIC) |  Обфускация: $(get_snell_obfs)"
+            echo -e "${CYAN}║${NC}      Маршрут: $(get_snell_routing)"
+        else
+            echo -e "${CYAN}║${NC}  ${BOLD}[2] ⚡ Snell (v5.0.1)${NC}         -> ${RED}НЕ УСТАНОВЛЕН${NC}"
+        fi
         echo -e "${CYAN}║${NC}"
-        echo -e "${CYAN}║${NC}  ${BOLD}[3] 🛡️ WDTT / qwdtt${NC}          -> $(get_wdtt_status)"
-        echo -e "${CYAN}║${NC}      Порты: 56000-56003       |  Пароль: ${GREEN}$(get_wdtt_password)${NC}"
-        echo -e "${CYAN}║${NC}      Маршрут: $(get_wdtt_routing)"
+        if is_wdtt_installed; then
+            echo -e "${CYAN}║${NC}  ${BOLD}[3] 🛡️ WDTT / qwdtt${NC}          -> $(get_wdtt_status)"
+            echo -e "${CYAN}║${NC}      Порты: 56000-56003       |  Пароль: ${GREEN}$(get_wdtt_password)${NC}"
+            echo -e "${CYAN}║${NC}      Маршрут: $(get_wdtt_routing)"
+        else
+            echo -e "${CYAN}║${NC}  ${BOLD}[3] 🛡️ WDTT / qwdtt${NC}          -> ${RED}НЕ УСТАНОВЛЕН${NC}"
+        fi
         echo -e "${CYAN}║${NC}"
         if is_csqtt_installed; then
             echo -e "${CYAN}║${NC}  ${BOLD}[4] 🔒 CSQTT (VPN & Web-панель)${NC}-> $(get_csqtt_status)"
@@ -1475,29 +2433,41 @@ main_hub() {
         else
             echo -e "${CYAN}║${NC}  ${BOLD}[4] 🔒 CSQTT (VPN & Web-панель)${NC}-> ${RED}НЕ УСТАНОВЛЕН${NC}"
         fi
+        echo -e "${CYAN}║${NC}"
+        if is_dns_installed; then
+            echo -e "${CYAN}║${NC}  ${BOLD}[5] 🌐 DNS-Туннель (WhiteDNS)${NC}  -> $(get_dns_status)"
+            echo -e "${CYAN}║${NC}      Домен: :${BOLD}$(get_dns_domain)${NC} (:53 UDP/TCP) | WAN: $(get_dns_wan_status)"
+            echo -e "${CYAN}║${NC}      Маршрут: $(get_dns_routing)"
+        else
+            echo -e "${CYAN}║${NC}  ${BOLD}[5] 🌐 DNS-Туннель (WhiteDNS)${NC}  -> ${RED}НЕ УСТАНОВЛЕН${NC}"
+        fi
         echo -e "${CYAN}╚══════════════════════════════════════════════════════════════════════╝${NC}"
         echo ""
         echo -e "  ${GREEN}${BOLD}[1]${NC} 🚀 ${BOLD}Управление Mieru${NC} (Anti-TSPU, Egress, пользователи, порты)"
         echo -e "  ${BLUE}${BOLD}[2]${NC} ⚡ ${BOLD}Управление Snell v5${NC} (0-RTT, Egress Xray/Direct, HTTP-obfs, PSK)"
-        echo -e "  ${PURPLE}${BOLD}[3]${NC} 🛡️ ${BOLD}Управление WDTT / qwdtt${NC} (Egress в ядро / Прямой выход, клиенты)"
+        echo -e "  ${PURPLE}${BOLD}[3]${NC} 🛡️  ${BOLD}Управление WDTT / qwdtt${NC} (Egress в ядро / Прямой выход, клиенты)"
         echo -e "  ${CYAN}${BOLD}[4]${NC} 🔒 ${BOLD}Управление CSQTT${NC} (Защита веб-панели, SSH-туннель, статус)"
+        echo -e "  ${YELLOW}${BOLD}[5]${NC} 🌐 ${BOLD}Управление DNS-туннелями${NC} (CottenDNS / MasterDnsVPN, stormdns://, WAN)"
         echo ""
-        echo -e "  ${YELLOW}[5]${NC} 📊 Сводный статус всех служб и портов сервера"
-        echo -e "  ${YELLOW}[6]${NC} 🔄 Перезапустить все сервисы (Mieru + Snell + WDTT + CSQTT)"
-        echo -e "  ${YELLOW}[0]${NC} 🚪 Выход"
+        echo -e "  ${BOLD}[6]${NC} 📊 Сводный статус всех служб и портов сервера"
+        echo -e "  ${BOLD}[7]${NC} 🔄 Перезапустить все сервисы (Mieru + Snell + WDTT + CSQTT + DNS)"
+        echo -e "  ${BOLD}[0]${NC} 🚪 Выход"
         echo ""
-        read -p "Выберите раздел [0-6]: " top_choice
+        read -p "Выберите раздел [0-7]: " top_choice
         case "$top_choice" in
             1) menu_mieru ;;
             2) menu_snell ;;
             3) menu_wdtt ;;
             4) menu_csqtt ;;
-            5) view_global_status ;;
-            6) restart_all_services ;;
+            5) menu_dns ;;
+            6) view_global_status ;;
+            7) restart_all_services ;;
             0) clear; exit 0 ;;
             *) echo "Неверный выбор"; sleep 1 ;;
         esac
     done
 }
 
-main_hub
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    main_hub
+fi
