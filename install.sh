@@ -236,6 +236,33 @@ try:
         else:
             print(f"FOUND_TPROXY={tproxy_port}")
 
+        # Очищаем sniffing на SOCKS5 входе ядра (предотвращает разрыв сессий и поломку туннелей)
+        for ib in inbounds:
+            if ib.get("protocol") == "socks" or ib.get("port") == socks_port or ib.get("tag") == "in-mieru-socks":
+                if "sniffing" in ib:
+                    del ib["sniffing"]
+                    modified = True
+                    print("CLEANED_SOCKS_SNIFFING=1")
+
+        # Обеспечиваем наличие blackhole outbound 'blocked'
+        outbound_tags = [o.get("tag") for o in cfg.get("outbounds", [])]
+        if "blocked" not in outbound_tags:
+            cfg.setdefault("outbounds", []).append({
+                "protocol": "blackhole",
+                "tag": "blocked",
+                "settings": {}
+            })
+            modified = True
+            print("CREATED_BLOCKED_OUTBOUND=1")
+
+        # Настройка Kill Switch для всех балансировщиков (fallbackTag: blocked)
+        balancers = cfg.get("routing", {}).get("balancers", [])
+        for b in balancers:
+            if b.get("fallbackTag") != "blocked":
+                b["fallbackTag"] = "blocked"
+                modified = True
+                print(f"PATCHED_BALANCER_FALLBACK={b.get('tag', 'balancer')}")
+
         if modified:
             new_val = json.dumps(cfg, indent=2, ensure_ascii=False)
             c.execute("UPDATE settings SET value=? WHERE key='xrayTemplateConfig'", (new_val,))
@@ -274,6 +301,16 @@ EOF
             CREATED_REDIRECT=*)
                 XRAY_REDIRECT_PORT="${line#*=}"
                 echo -e "  ${GREEN}✓ Создан новый REDIRECT шлюз:${NC} :${XRAY_REDIRECT_PORT}"
+                ;;
+            CLEANED_SOCKS_SNIFFING=1)
+                echo -e "  ${GREEN}✓ Отключен sniffing на SOCKS5 входе ядра (предотвращение сбоев)${NC}"
+                ;;
+            PATCHED_BALANCER_FALLBACK=*)
+                b_name="${line#*=}"
+                echo -e "  ${GREEN}✓ Настроен Kill Switch для балансировщика [${b_name}]: fallbackTag -> blocked${NC}"
+                ;;
+            CREATED_BLOCKED_OUTBOUND=1)
+                echo -e "  ${GREEN}✓ Добавлен защитный шлюз сброса трафика 'blocked' (blackhole)${NC}"
                 ;;
             RELOAD_XUI=1)
                 systemctl restart x-ui 2>/dev/null || true
@@ -578,9 +615,13 @@ iptables -t mangle -C PREROUTING -i wdttraw0 -j WDTT_TPROXY 2>/dev/null || iptab
 iptables -C INPUT -i \${WAN_IF} -p tcp --dport \${TPROXY_PORT} -j DROP 2>/dev/null || iptables -I INPUT -i \${WAN_IF} -p tcp --dport \${TPROXY_PORT} -j DROP
 iptables -C INPUT -i \${WAN_IF} -p udp --dport \${TPROXY_PORT} -j DROP 2>/dev/null || iptables -I INPUT -i \${WAN_IF} -p udp --dport \${TPROXY_PORT} -j DROP
 
-# 4. Remove direct MASQUERADE
-iptables -t nat -D POSTROUTING -s 10.66.0.0/16 -o \${WAN_IF} -m comment --comment WDTT_MANAGED -j MASQUERADE 2>/dev/null || true
-iptables -t nat -D POSTROUTING -s 10.70.0.0/16 -o \${WAN_IF} -m comment --comment WDTT_RAW_MANAGED -j MASQUERADE 2>/dev/null || true
+# 4. Remove direct MASQUERADE (Kill Switch for direct leak)
+while iptables -t nat -D POSTROUTING -s 10.66.0.0/16 -j MASQUERADE 2>/dev/null; do :; done
+while iptables -t nat -D POSTROUTING -s 10.66.0.0/16 -o \${WAN_IF} -j MASQUERADE 2>/dev/null; do :; done
+while iptables -t nat -D POSTROUTING -s 10.66.0.0/16 -o \${WAN_IF} -m comment --comment WDTT_MANAGED -j MASQUERADE 2>/dev/null; do :; done
+while iptables -t nat -D POSTROUTING -s 10.70.0.0/16 -j MASQUERADE 2>/dev/null; do :; done
+while iptables -t nat -D POSTROUTING -s 10.70.0.0/16 -o \${WAN_IF} -j MASQUERADE 2>/dev/null; do :; done
+while iptables -t nat -D POSTROUTING -s 10.70.0.0/16 -o \${WAN_IF} -m comment --comment WDTT_RAW_MANAGED -j MASQUERADE 2>/dev/null; do :; done
 EOF
 chmod +x /usr/local/bin/wdtt-tproxy.sh
 
@@ -673,6 +714,27 @@ if [ "$INSTALL_MIERU" = "yes" ]; then
     echo -e "  • Защита: Low-Entropy 48-bit + Rotate Right 7"
     pattern=$(mita export traffic-pattern 2>/dev/null || echo "")
     echo -e "  • Ссылка: ${CYAN}mierus://${MIERU_USER}:${MIERU_PASS}@${SERVER_IP}/?profile=Mieru-Home&port=${MIERU_PORTS}&protocol=${MIERU_PROTO}&multiplexing=MULTIPLEXING_HIGH&traffic-pattern=${pattern}&low-entropy-mode=LOW_ENTROPY_MODE_48&low-entropy-mask-rotation=LOW_ENTROPY_MASK_ROTATE_RIGHT_7${NC}"
+    echo ""
+fi
+if command -v wdtt >/dev/null 2>&1 || [ -f "/etc/systemd/system/wdtt.service" ] || [ -d "/etc/wdtt" ]; then
+    wdtt_p="56000"
+    [ -f "/etc/systemd/system/wdtt.service" ] && wdtt_p=$(grep -oP -- '-listen\s+[0-9.]+:\K[0-9]+' /etc/systemd/system/wdtt.service 2>/dev/null || echo "56000")
+    wdtt_pass="sad_534188_sad"
+    [ -f "/etc/wdtt/main.password" ] && wdtt_pass=$(cat /etc/wdtt/main.password | tr -d '\r\n')
+    prof_name="WDTT-${SERVER_IP}"
+    [ -f "/etc/wdtt/profile_name.txt" ] && prof_name=$(cat /etc/wdtt/profile_name.txt | tr -d '\r\n')
+    
+    qwdtt_link=$(python3 -c "
+import urllib.parse, sys
+name, ip, port, password = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+print(f'qwdtt://config?name={urllib.parse.quote_plus(name)}&peer={ip}%3A{port}&hashes=&workers=18&port=9000&pass={urllib.parse.quote_plus(password)}')
+" "$prof_name" "$SERVER_IP" "$wdtt_p" "$wdtt_pass" 2>/dev/null || echo "")
+
+    echo -e "${BOLD}Параметры WDTT / qwdtt:${NC}"
+    echo -e "  • Сервер:   ${SERVER_IP}:${wdtt_p}"
+    echo -e "  • Профиль:  ${prof_name}"
+    echo -e "  • Пароль:   ${GREEN}${wdtt_pass}${NC}"
+    echo -e "  • Ссылка:   ${CYAN}${qwdtt_link}${NC}"
     echo ""
 fi
 echo -e "${GREEN}Все службы запущены и работают в фоновом режиме.${NC}"

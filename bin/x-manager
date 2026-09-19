@@ -33,6 +33,8 @@ SNELL_ROUTING_FILE="/etc/snell/routing.mode"
 WDTT_DIR="/etc/wdtt"
 WDTT_PASSWORD_FILE="/etc/wdtt/main.password"
 WDTT_DB_FILE="/etc/wdtt/passwords.json"
+WDTT_PROFILE_FILE="/etc/wdtt/profile_name.txt"
+WDTT_SERVICE_FILE="/etc/systemd/system/wdtt.service"
 
 CSQTT_DIR="/etc/csqtt"
 CSQTT_ENV_FILE="/etc/csqtt/csqtt.env"
@@ -326,6 +328,45 @@ get_wdtt_password() {
     else
         echo "sad_534188_sad"
     fi
+}
+
+get_wdtt_peer_port() {
+    local port=""
+    if [ -f "$WDTT_SERVICE_FILE" ]; then
+        port=$(grep -oP -- '-listen\s+[0-9.]+:\K[0-9]+' "$WDTT_SERVICE_FILE" 2>/dev/null || true)
+    fi
+    if [ -z "$port" ]; then
+        port=$(ss -ulpn 2>/dev/null | grep wdtt-server | awk '{print $4}' | awk -F: '{print $NF}' | grep -v '56001\|37001' | head -n 1 || true)
+    fi
+    if [ -z "$port" ]; then
+        port="56000"
+    fi
+    echo "$port"
+}
+
+get_wdtt_profile_name() {
+    if [ -f "$WDTT_PROFILE_FILE" ]; then
+        cat "$WDTT_PROFILE_FILE" | tr -d '\r\n'
+    else
+        echo "WDTT-${SERVER_IP}"
+    fi
+}
+
+wdtt_change_profile_name() {
+    show_wdtt_header
+    local cur_name=$(get_wdtt_profile_name)
+    echo -e "${BOLD}--- Смена названия подключения WDTT (qwdtt) ---${NC}"
+    echo -e "Текущее название: ${CYAN}${cur_name}${NC}"
+    echo ""
+    read -p "Введите новое название подключения (например: СПб обход бс): " new_name
+    if [ -n "$new_name" ]; then
+        mkdir -p "$WDTT_DIR"
+        echo -n "$new_name" > "$WDTT_PROFILE_FILE"
+        echo -e "${GREEN}✓ Название подключения обновлено: ${new_name}${NC}"
+    else
+        echo -e "${YELLOW}Изменения отменены (пустое значение).${NC}"
+    fi
+    sleep 1.5
 }
 
 get_wdtt_routing() {
@@ -1058,13 +1099,15 @@ menu_snell() {
 # ==============================================================================
 show_wdtt_header() {
     clear
+    local peer_p=$(get_wdtt_peer_port)
+    local prof_name=$(get_wdtt_profile_name)
     echo -e "${CYAN}╔══════════════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${CYAN}║${BOLD}             РАЗДЕЛ: УПРАВЛЕНИЕ WDTT / QWDTT (VPN-СЕРВЕР)             ${CYAN}║${NC}"
     echo -e "${CYAN}╠══════════════════════════════════════════════════════════════════════╣${NC}"
-    echo -e "${CYAN}║${NC}  Сервер:  ${BOLD}${SERVER_IP}${NC}  |  Служба: $(get_wdtt_status)"
-    echo -e "${CYAN}║${NC}  Порты:   ${BOLD}56000 (TURN) | 56002 (Direct) | 56003 (Raw) | 56001 (WG)${NC}"
-    echo -e "${CYAN}║${NC}  Маршрут: $(get_wdtt_routing)"
-    echo -e "${CYAN}║${NC}  Пароль:  ${GREEN}$(get_wdtt_password)${NC}"
+    echo -e "${CYAN}║${NC}  Сервер:   ${BOLD}${SERVER_IP}${NC}  |  Служба: $(get_wdtt_status)"
+    echo -e "${CYAN}║${NC}  Порты:    ${BOLD}:${peer_p}/UDP (VPN) | 56002 (Direct) | 56003 (Raw) | 56001 (WG)${NC}"
+    echo -e "${CYAN}║${NC}  Профиль:  ${BOLD}${prof_name}${NC}"
+    echo -e "${CYAN}║${NC}  Маршрут:  $(get_wdtt_routing)  |  Пароль: ${GREEN}$(get_wdtt_password)${NC}"
     echo -e "${CYAN}╚══════════════════════════════════════════════════════════════════════╝${NC}"
     echo ""
 }
@@ -1085,7 +1128,13 @@ wdtt_manage_routing() {
             /usr/local/bin/wdtt-tproxy.sh
             systemctl enable wdtt-tproxy 2>/dev/null || true
             systemctl restart wdtt-tproxy 2>/dev/null || true
-            echo -e "${GREEN}✓ Маршрутизация WDTT: Xray${NC}"
+            while iptables -t nat -D POSTROUTING -s 10.66.0.0/16 -j MASQUERADE 2>/dev/null; do :; done
+            while iptables -t nat -D POSTROUTING -s 10.66.0.0/16 -o "$WAN_IF" -j MASQUERADE 2>/dev/null; do :; done
+            while iptables -t nat -D POSTROUTING -s 10.66.0.0/16 -o "$WAN_IF" -m comment --comment WDTT_MANAGED -j MASQUERADE 2>/dev/null; do :; done
+            while iptables -t nat -D POSTROUTING -s 10.70.0.0/16 -j MASQUERADE 2>/dev/null; do :; done
+            while iptables -t nat -D POSTROUTING -s 10.70.0.0/16 -o "$WAN_IF" -j MASQUERADE 2>/dev/null; do :; done
+            while iptables -t nat -D POSTROUTING -s 10.70.0.0/16 -o "$WAN_IF" -m comment --comment WDTT_RAW_MANAGED -j MASQUERADE 2>/dev/null; do :; done
+            echo -e "${GREEN}✓ Маршрутизация WDTT: Xray (TPROXY)${NC}"
             sleep 2
             ;;
         2)
@@ -1095,13 +1144,12 @@ wdtt_manage_routing() {
             systemctl disable wdtt-tproxy 2>/dev/null || true
             iptables -t nat -C POSTROUTING -s 10.66.0.0/16 -o "$WAN_IF" -m comment --comment WDTT_MANAGED -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s 10.66.0.0/16 -o "$WAN_IF" -m comment --comment WDTT_MANAGED -j MASQUERADE
             iptables -t nat -C POSTROUTING -s 10.70.0.0/16 -o "$WAN_IF" -m comment --comment WDTT_RAW_MANAGED -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s 10.70.0.0/16 -o "$WAN_IF" -m comment --comment WDTT_RAW_MANAGED -j MASQUERADE
-            echo -e "${GREEN}✓ Маршрутизация WDTT: Прямой выход${NC}"
+            echo -e "${GREEN}✓ Маршрутизация WDTT: Прямой выход (NAT MASQUERADE)${NC}"
             sleep 2
             ;;
         0) return ;;
     esac
 }
-
 
 wdtt_view_devices() {
     show_wdtt_header
@@ -1113,6 +1161,47 @@ wdtt_view_devices() {
     fi
     echo ""
     read -p "Нажмите Enter для возврата..."
+}
+
+show_qwdtt_link() {
+    clear
+    local peer_p=$(get_wdtt_peer_port)
+    local pass=$(get_wdtt_password)
+    local name=$(get_wdtt_profile_name)
+
+    local qwdtt_url=$(python3 -c "
+import urllib.parse, sys
+name, ip, port, password = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+name_enc = urllib.parse.quote_plus(name)
+peer_enc = f'{ip}%3A{port}'
+pass_enc = urllib.parse.quote_plus(password)
+print(f'qwdtt://config?name={name_enc}&peer={peer_enc}&hashes=&workers=18&port=9000&pass={pass_enc}')
+" "$name" "$SERVER_IP" "$peer_p" "$pass" 2>/dev/null || echo "")
+
+    echo -e "${CYAN}╔══════════════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${CYAN}║${BOLD}          ССЫЛКА ПОДКЛЮЧЕНИЯ И QR-КОД QWDTT (WDTT VPN)                ${CYAN}║${NC}"
+    echo -e "${CYAN}╚══════════════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    echo -e "${BOLD}Параметры подключения:${NC}"
+    echo -e "  • Название профиля:    ${GREEN}${name}${NC}"
+    echo -e "  • Сервер (IP:Порт):    ${CYAN}${SERVER_IP}:${peer_p}${NC}"
+    echo -e "  • Внутренний порт:     ${CYAN}9000${NC}"
+    echo -e "  • Количество воркеров: ${CYAN}18${NC}"
+    echo -e "  • Пароль подключения:  ${GREEN}${pass}${NC}"
+    echo -e "  • Режим маршрута:      $(get_wdtt_routing)"
+    echo ""
+    echo -e "${BOLD}Ссылка конфигурации (qwdtt://):${NC}"
+    echo -e "${YELLOW}${qwdtt_url}${NC}"
+    echo ""
+    echo -e "${BOLD}QR-код для импорта в клиент QWDTT:${NC}"
+    echo ""
+    qrencode -t ANSI256 "$qwdtt_url" 2>/dev/null || qrencode -t UTF8 "$qwdtt_url" 2>/dev/null || echo "qrencode не установлен или не смог отрендерить QR"
+    echo ""
+    echo -e "${CYAN}────────────────────────────────────────────────────────────────────────${NC}"
+    echo -e "Скопируйте ссылку выше или отсканируйте QR-код в мобильном клиенте ${BOLD}qwdtt${NC}."
+    echo -e "${CYAN}────────────────────────────────────────────────────────────────────────${NC}"
+    echo ""
+    read -p "Нажмите Enter для возврата в меню..."
 }
 
 menu_wdtt() {
@@ -1132,25 +1221,30 @@ menu_wdtt() {
         echo -e "  ${YELLOW}[1]${NC} 📊 Статус службы WDTT и активные сокеты"
         echo -e "  ${YELLOW}[2]${NC} 🌐 Маршрутизация трафика (Xray / Прямой выход)"
         echo -e "  ${YELLOW}[3]${NC} 👥 Просмотр подключенных устройств и трафика"
-        echo -e "  ${YELLOW}[4]${NC} 📜 Живые логи службы WDTT (journalctl)"
-        echo -e "  ${YELLOW}[5]${NC} 🔄 Перезапустить службу wdtt"
+        echo -e "  ${YELLOW}[4]${NC} 🔗 ${BOLD}Показать ссылку подключения qwdtt:// и QR-код${NC}"
+        echo -e "  ${YELLOW}[5]${NC} ✏️  ${BOLD}Изменить название подключения (name)${NC}"
+        echo -e "  ${YELLOW}[6]${NC} 📜 Живые логи службы WDTT (journalctl)"
+        echo -e "  ${YELLOW}[7]${NC} 🔄 Перезапустить службу wdtt"
         echo -e "  ${YELLOW}[0]${NC} ⬅️  Назад в Главное Меню"
         echo ""
-        read -p "Выберите пункт [0-5]: " w_choice
+        read -p "Выберите пункт [0-7]: " w_choice
         case "$w_choice" in
             1)
                 show_wdtt_header
                 systemctl status wdtt --no-pager
                 echo ""
-                ss -tulpn | grep wdtt || echo "Сокеты не найдены"
+                ss -tulpn 2>/dev/null | grep wdtt || echo "Сокеты не найдены"
                 echo ""
                 read -p "Нажмите Enter..."
                 ;;
             2) wdtt_manage_routing ;;
             3) wdtt_view_devices ;;
-            4) journalctl -u wdtt -f -n 50 ;;
-            5) restart_wdtt_and_verify; sleep 2 ;;
+            4) show_qwdtt_link ;;
+            5) wdtt_change_profile_name ;;
+            6) journalctl -u wdtt -f -n 50 ;;
+            7) restart_wdtt_and_verify; sleep 2 ;;
             0) return ;;
+            *) echo "Неверный выбор"; sleep 1 ;;
         esac
     done
 }
@@ -2705,7 +2799,8 @@ main_hub() {
         echo -e "${CYAN}║${NC}"
         if is_wdtt_installed; then
             echo -e "${CYAN}║${NC}  ${BOLD}[3] 🛡️ WDTT / qwdtt${NC}          -> $(get_wdtt_status)"
-            echo -e "${CYAN}║${NC}      Порты: 56000-56003       |  Пароль: ${GREEN}$(get_wdtt_password)${NC}"
+            echo -e "${CYAN}║${NC}      Порт:   :${BOLD}$(get_wdtt_peer_port)/UDP${NC}   |  Пароль: ${GREEN}$(get_wdtt_password)${NC}"
+            echo -e "${CYAN}║${NC}      Профиль: ${BOLD}$(get_wdtt_profile_name)${NC}"
             echo -e "${CYAN}║${NC}      Маршрут: $(get_wdtt_routing)"
         else
             echo -e "${CYAN}║${NC}  ${BOLD}[3] 🛡️ WDTT / qwdtt${NC}          -> ${RED}НЕ УСТАНОВЛЕН${NC}"
