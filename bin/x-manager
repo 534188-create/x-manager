@@ -1565,6 +1565,16 @@ get_dns_key() {
     echo "$k"
 }
 
+get_dns_profile_name() {
+    local pf="/etc/x-manager/dns_profile_name.txt"
+    [ -f "$pf" ] || pf="/etc/masterdns/profile_name.txt"
+    [ -f "$pf" ] || pf="/etc/cottendns/profile_name.txt"
+    local pname=""
+    [ -f "$pf" ] && pname=$(cat "$pf" 2>/dev/null | tr -d '\r\n' || true)
+    [ -z "$pname" ] && pname="FP dns tunnel"
+    echo "$pname"
+}
+
 get_dns_routing() {
     local conf="$MASTERDNS_CONFIG_FILE"
     [ -f "$conf" ] || conf="$COTTEN_CONFIG_FILE"
@@ -1675,7 +1685,7 @@ get_stormdns_link() {
     local p_name="$4"
     [ -z "$p_domain" ] && p_domain=$(get_dns_domain)
     [ -z "$p_key" ] && p_key=$(get_dns_key)
-    [ -z "$p_name" ] && p_name="FP dns tunnel"
+    [ -z "$p_name" ] && p_name=$(get_dns_profile_name)
     python3 - << PYEOF
 import json, base64
 
@@ -1763,9 +1773,12 @@ show_single_dns_profile() {
     local ptype="$1"
     local title="$2"
     local desc="$3"
+    local tag="$4"
     local dom=$(get_dns_domain)
     local key=$(get_dns_key)
-    local pname="FP dns tunnel"
+    local base_name=$(get_dns_profile_name)
+    local pname="${base_name}"
+    [ -n "$tag" ] && pname="${base_name} [${tag}]"
     local link=$(get_stormdns_link "$ptype" "$dom" "$key" "$pname")
 
     clear
@@ -1774,6 +1787,7 @@ show_single_dns_profile() {
     echo -e "${CYAN}╚══════════════════════════════════════════════════════════════════════╝${NC}"
     echo ""
     echo -e "${BOLD}Параметры профиля:${NC}"
+    echo -e "  • Имя профиля:   ${YELLOW}${pname}${NC}"
     echo -e "  • Домен зоны:    ${CYAN}${dom}${NC}"
     echo -e "  • Ключ:          ${GREEN}${key}${NC} (AES-256-GCM)"
     echo -e "  • Особенности:   ${YELLOW}${desc}${NC}"
@@ -1793,10 +1807,12 @@ show_dns_profiles() {
 
     while true; do
         clear
+        local base_pname=$(get_dns_profile_name)
         echo -e "${CYAN}╔══════════════════════════════════════════════════════════════════════╗${NC}"
         echo -e "${CYAN}║${BOLD}          ПРОФИЛИ ПОДКЛЮЧЕНИЯ WHITEDNS / STORMDNS                     ${CYAN}║${NC}"
         echo -e "${CYAN}╠══════════════════════════════════════════════════════════════════════╣${NC}"
-        echo -e "${CYAN}║${NC}  Домен: ${BOLD}${dom}${NC}  |  Ключ: ${GREEN}${key:0:16}...${NC}  |  AES-256-GCM"
+        echo -e "${CYAN}║${NC}  Имя базы: ${YELLOW}${BOLD}${base_pname}${NC}"
+        echo -e "${CYAN}║${NC}  Домен:    ${BOLD}${dom}${NC}  |  Ключ: ${GREEN}${key:0:16}...${NC}  |  AES-256-GCM"
         echo -e "${CYAN}╚══════════════════════════════════════════════════════════════════════╝${NC}"
         echo ""
         echo -e "  ${YELLOW}[1]${NC} 🛡️  ${BOLD}Профиль 1: «Жесткая цензура»${NC}"
@@ -1814,13 +1830,13 @@ show_dns_profiles() {
         read -p "Выберите профиль [0-4]: " prof_choice
         case "$prof_choice" in
             1)
-                show_single_dns_profile 1 "ПРОФИЛЬ 1: ЖЕСТКАЯ ЦЕНЗУРА (MAX SURVIVAL)" "Дублирование x4, Base32, Пинг 50ms, MTU 28..200/60..900"
+                show_single_dns_profile 1 "ПРОФИЛЬ 1: ЖЕСТКАЯ ЦЕНЗУРА (MAX SURVIVAL)" "Дублирование x4, Base32, Пинг 50ms, MTU 28..200/60..900" "Жесткая цензура"
                 ;;
             2)
-                show_single_dns_profile 2 "ПРОФИЛЬ 2: СТАНДАРТНЫЙ (BALANCED SPEED)" "Дублирование x2, Пинг 100ms, MTU 38..150/100..500"
+                show_single_dns_profile 2 "ПРОФИЛЬ 2: СТАНДАРТНЫЙ (BALANCED SPEED)" "Дублирование x2, Пинг 100ms, MTU 38..150/100..500" "Стандартный"
                 ;;
             3)
-                show_single_dns_profile 3 "ПРОФИЛЬ 3: МОБИЛЬНЫЙ / СКОРОСТНОЙ (LOW BATTERY)" "Дублирование x1, Пинг 100ms, Cooldown 4s, MTU 38..150/100..500"
+                show_single_dns_profile 3 "ПРОФИЛЬ 3: МОБИЛЬНЫЙ / СКОРОСТНОЙ (LOW BATTERY)" "Дублирование x1, Пинг 100ms, Cooldown 4s, MTU 38..150/100..500" "Скоростной"
                 ;;
             4)
                 clear
@@ -1828,14 +1844,14 @@ show_dns_profiles() {
                 echo -e "${CYAN}║${BOLD}          ВСЕ 3 ПРОФИЛЯ ПОДКЛЮЧЕНИЯ ДЛЯ КОПИРОВАНИЯ                   ${CYAN}║${NC}"
                 echo -e "${CYAN}╚══════════════════════════════════════════════════════════════════════╝${NC}"
                 echo ""
-                echo -e "${YELLOW}${BOLD}1. Жесткая цензура:${NC}"
-                get_stormdns_link 1 "$dom" "$key" "FP dns tunnel [Жесткая цензура]"
+                echo -e "${YELLOW}${BOLD}1. Жесткая цензура (${base_pname} [Жесткая цензура]):${NC}"
+                get_stormdns_link 1 "$dom" "$key" "${base_pname} [Жесткая цензура]"
                 echo ""
-                echo -e "${YELLOW}${BOLD}2. Стандартный:${NC}"
-                get_stormdns_link 2 "$dom" "$key" "FP dns tunnel [Стандартный]"
+                echo -e "${YELLOW}${BOLD}2. Стандартный (${base_pname} [Стандартный]):${NC}"
+                get_stormdns_link 2 "$dom" "$key" "${base_pname} [Стандартный]"
                 echo ""
-                echo -e "${YELLOW}${BOLD}3. Мобильный / Скоростной:${NC}"
-                get_stormdns_link 3 "$dom" "$key" "FP dns tunnel [Скоростной]"
+                echo -e "${YELLOW}${BOLD}3. Мобильный / Скоростной (${base_pname} [Скоростной]):${NC}"
+                get_stormdns_link 3 "$dom" "$key" "${base_pname} [Скоростной]"
                 echo ""
                 read -p "Нажмите Enter для возврата..."
                 ;;
@@ -1913,6 +1929,22 @@ dns_change_key() {
     sleep 2
 }
 
+dns_change_profile_name() {
+    clear
+    local cur_pname=$(get_dns_profile_name)
+    echo -e "${BOLD}--- Смена имени профилей подключения DNS-туннеля ---${NC}"
+    echo -e "Текущее базовое имя: ${CYAN}${cur_pname}${NC}\n"
+    read -p "Введите новое базовое имя профиля [Enter для '$cur_pname']: " new_pname
+    new_pname=$(echo "$new_pname" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+    [ -z "$new_pname" ] && return
+    mkdir -p /etc/x-manager /etc/masterdns /etc/cottendns
+    echo -n "$new_pname" > /etc/x-manager/dns_profile_name.txt
+    echo -n "$new_pname" > /etc/masterdns/profile_name.txt 2>/dev/null || true
+    echo -n "$new_pname" > /etc/cottendns/profile_name.txt 2>/dev/null || true
+    echo -e "${GREEN}✓ Имя профилей подключения успешно изменено на: '${new_pname}'!${NC}"
+    sleep 2
+}
+
 dns_change_routing() {
     clear
     echo -e "${BOLD}--- Настройка маршрутизации DNS-туннеля ---${NC}"
@@ -1958,19 +1990,22 @@ menu_dns_settings() {
         echo -e "${CYAN}╠══════════════════════════════════════════════════════════════════════╣${NC}"
         echo -e "${CYAN}║${NC}  Домен зоны:  ${CYAN}${BOLD}$(get_dns_domain)${NC}"
         echo -e "${CYAN}║${NC}  Ключ шифр.:  ${GREEN}$(get_dns_key)${NC} (AES-256-GCM)"
+        echo -e "${CYAN}║${NC}  Имя профиля: ${YELLOW}${BOLD}$(get_dns_profile_name)${NC}"
         echo -e "${CYAN}║${NC}  Маршрут:     $(get_dns_routing)"
         echo -e "${CYAN}╚══════════════════════════════════════════════════════════════════════╝${NC}"
         echo ""
         echo -e "  ${YELLOW}[1]${NC} 🌐 Сменить домен DNS-зоны"
         echo -e "  ${YELLOW}[2]${NC} 🔑 Сменить / сгенерировать ключ шифрования"
-        echo -e "  ${YELLOW}[3]${NC} 🔀 Изменить маршрутизацию (Xray SOCKS5 / Direct)"
+        echo -e "  ${YELLOW}[3]${NC} 🏷️  Сменить имя подключения (профилей в приложении)"
+        echo -e "  ${YELLOW}[4]${NC} 🔀 Изменить маршрутизацию (Xray SOCKS5 / Direct)"
         echo -e "  ${YELLOW}[0]${NC} ⬅️  Назад"
         echo ""
-        read -p "Выберите пункт [0-3]: " s_choice
+        read -p "Выберите пункт [0-4]: " s_choice
         case "$s_choice" in
             1) dns_change_domain ;;
             2) dns_change_key ;;
-            3) dns_change_routing ;;
+            3) dns_change_profile_name ;;
+            4) dns_change_routing ;;
             0) return ;;
         esac
     done
@@ -2005,6 +2040,15 @@ install_cottendns() {
     [ -z "$cur_key" ] && cur_key=$(openssl rand -hex 16 2>/dev/null || echo "a7125b5f3cc23e525123c677bc6d202e")
     read -p "Ключ шифрования (AES-256-GCM, 32 hex символа) [Enter для $cur_key]: " user_key
     [ -n "$user_key" ] && cur_key="$user_key"
+
+    local cur_pname=$(get_dns_profile_name)
+    read -p "Имя профилей подключения в приложении [Enter для '$cur_pname']: " user_pname
+    user_pname=$(echo "$user_pname" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+    [ -z "$user_pname" ] && user_pname="$cur_pname"
+    mkdir -p /etc/x-manager /etc/cottendns /etc/masterdns
+    echo -n "$user_pname" > /etc/x-manager/dns_profile_name.txt
+    echo -n "$user_pname" > /etc/cottendns/profile_name.txt 2>/dev/null || true
+    echo -n "$user_pname" > /etc/masterdns/profile_name.txt 2>/dev/null || true
 
     echo ""
     echo -e "${YELLOW}Скачивание и установка CottenDNS...${NC}"
@@ -2149,6 +2193,15 @@ install_masterdns() {
     [ -z "$cur_key" ] && cur_key=$(openssl rand -hex 16 2>/dev/null || echo "a7125b5f3cc23e525123c677bc6d202e")
     read -p "Ключ шифрования (AES-256-GCM, 32 hex символа) [Enter для $cur_key]: " user_key
     [ -n "$user_key" ] && cur_key="$user_key"
+
+    local cur_pname=$(get_dns_profile_name)
+    read -p "Имя профилей подключения в приложении [Enter для '$cur_pname']: " user_pname
+    user_pname=$(echo "$user_pname" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+    [ -z "$user_pname" ] && user_pname="$cur_pname"
+    mkdir -p /etc/x-manager /etc/masterdns /etc/cottendns
+    echo -n "$user_pname" > /etc/x-manager/dns_profile_name.txt
+    echo -n "$user_pname" > /etc/masterdns/profile_name.txt 2>/dev/null || true
+    echo -n "$user_pname" > /etc/cottendns/profile_name.txt 2>/dev/null || true
 
     echo ""
     echo -e "${YELLOW}Скачивание и установка MasterDnsVPN...${NC}"
@@ -2316,13 +2369,14 @@ show_dns_header() {
     local eng_name=$(get_dns_engine_name)
     local dom=$(get_dns_domain)
     local key=$(get_dns_key)
+    local pname=$(get_dns_profile_name)
     echo -e "${CYAN}╔══════════════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${CYAN}║${BOLD}          УПРАВЛЕНИЕ DNS-ТУННЕЛЯМИ (MASTERDNSVPN / COTTENDNS)         ${CYAN}║${NC}"
     echo -e "${CYAN}╠══════════════════════════════════════════════════════════════════════╣${NC}"
     echo -e "${CYAN}║${NC}  Сервер: ${BOLD}${SERVER_IP}${NC}  |  Статус: $(get_dns_status)"
     echo -e "${CYAN}║${NC}  Активный движок: ${BOLD}${eng_name}${NC}"
     echo -e "${CYAN}║${NC}  Домен:  ${CYAN}${BOLD}${dom}${NC}  |  Порт: ${BOLD}:53 (UDP/TCP)${NC}"
-    echo -e "${CYAN}║${NC}  Доступ WAN: $(get_dns_wan_status)"
+    echo -e "${CYAN}║${NC}  Имя:    ${YELLOW}${BOLD}${pname}${NC}  |  Доступ WAN: $(get_dns_wan_status)"
     echo -e "${CYAN}║${NC}  Ключ:   ${GREEN}${key:0:16}...${NC}  |  Маршрут: $(get_dns_routing)"
     echo -e "${CYAN}╚══════════════════════════════════════════════════════════════════════╝${NC}"
     echo ""

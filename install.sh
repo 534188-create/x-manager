@@ -16,6 +16,10 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m'
 
+clear() {
+    command clear 2>/dev/null || true
+}
+
 # Проверка прав суперпользователя
 if [ "$EUID" -ne 0 ]; then
     echo -e "${RED}Ошибка: данный скрипт должен быть запущен с правами root (sudo)!${NC}"
@@ -604,9 +608,7 @@ echo -e "  ✓ Внутренние порты ядра Xray (${XRAY_TPROXY_PORT
 echo -e "${CYAN}==> Шаг 7: Развертывание диспетчера x-manager...${NC}"
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 if [ -f "$SCRIPT_DIR/bin/x-manager" ]; then
-    cp "$SCRIPT_DIR/bin/x-manager" /usr/local/bin/x-manager
-elif [ -f "/usr/local/bin/x-manager" ]; then
-    chmod +x /usr/local/bin/x-manager
+    cp -f "$SCRIPT_DIR/bin/x-manager" /usr/local/bin/x-manager
 else
     curl -fsSL -o /usr/local/bin/x-manager https://raw.githubusercontent.com/534188-create/x-manager/main/bin/x-manager 2>/dev/null || true
 fi
