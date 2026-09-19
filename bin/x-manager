@@ -1365,7 +1365,7 @@ snell_export_links() {
     if [ "$obfs_mode" != "off" ] && [ -n "$obfs_mode" ]; then
         snell_url="${snell_url}&obfs-mode=${client_obfs}&obfs-host=${obfs_host}"
     fi
-    snell_url="${snell_url}#${tag}"
+    snell_url="${snell_url}&reuse=true&tfo=true#${tag}"
 
     local surge_line="${tag} = snell, ${SERVER_IP}, ${s_port}, psk=${s_psk}, version=5"
     if [ "$obfs_mode" != "off" ] && [ -n "$obfs_mode" ]; then
