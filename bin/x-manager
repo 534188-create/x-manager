@@ -33,6 +33,15 @@ WDTT_DIR="/etc/wdtt"
 WDTT_PASSWORD_FILE="/etc/wdtt/main.password"
 WDTT_DB_FILE="/etc/wdtt/passwords.json"
 
+CSQTT_DIR="/etc/csqtt"
+CSQTT_ENV_FILE="/etc/csqtt/csqtt.env"
+CSQTT_LOCK_FILE="/etc/csqtt/ssh_only.lock"
+CSQTT_NET_UP="/usr/local/lib/csqtt/network-up.sh"
+CSQTT_SERVICE_FILE="/etc/systemd/system/csqtt.service"
+
+WAN_IF=$(ip route show default 2>/dev/null | awk '{print $5}' | head -n 1)
+[ -z "$WAN_IF" ] && WAN_IF="ens3"
+
 IP_FILE="/etc/mita/server_ip.txt"
 
 get_server_ip() {
@@ -1006,8 +1015,8 @@ wdtt_manage_routing() {
             iptables -t mangle -D PREROUTING -i wdttraw0 -j WDTT_TPROXY 2>/dev/null || true
             systemctl stop wdtt-tproxy 2>/dev/null || true
             systemctl disable wdtt-tproxy 2>/dev/null || true
-            iptables -t nat -C POSTROUTING -s 10.66.0.0/16 -o ens3 -m comment --comment WDTT_MANAGED -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s 10.66.0.0/16 -o ens3 -m comment --comment WDTT_MANAGED -j MASQUERADE
-            iptables -t nat -C POSTROUTING -s 10.70.0.0/16 -o ens3 -m comment --comment WDTT_RAW_MANAGED -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s 10.70.0.0/16 -o ens3 -m comment --comment WDTT_RAW_MANAGED -j MASQUERADE
+            iptables -t nat -C POSTROUTING -s 10.66.0.0/16 -o "$WAN_IF" -m comment --comment WDTT_MANAGED -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s 10.66.0.0/16 -o "$WAN_IF" -m comment --comment WDTT_MANAGED -j MASQUERADE
+            iptables -t nat -C POSTROUTING -s 10.70.0.0/16 -o "$WAN_IF" -m comment --comment WDTT_RAW_MANAGED -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s 10.70.0.0/16 -o "$WAN_IF" -m comment --comment WDTT_RAW_MANAGED -j MASQUERADE
             echo -e "${GREEN}✓ Маршрутизация WDTT: Прямой выход${NC}"
             sleep 2
             ;;
@@ -1058,7 +1067,315 @@ menu_wdtt() {
 }
 
 # ==============================================================================
-# РАЗДЕЛ 4: ОБЩИЙ СТАТУС ВСЕХ СЛУЖБ
+# РАЗДЕЛ 4: CSQTT (VPN SERVER & WEB PANEL)
+# ==============================================================================
+is_csqtt_installed() {
+    if command -v csqtt >/dev/null 2>&1 || [ -f "$CSQTT_SERVICE_FILE" ] || [ -d "$CSQTT_DIR" ]; then
+        return 0
+    fi
+    return 1
+}
+
+get_csqtt_status() {
+    if ! is_csqtt_installed; then
+        echo -e "${RED}НЕ УСТАНОВЛЕН${NC}"
+        return
+    fi
+    if systemctl is-active --quiet csqtt 2>/dev/null; then
+        echo -e "${GREEN}АКТИВЕН (В РАБОТЕ)${NC}"
+    elif systemctl is-enabled --quiet csqtt 2>/dev/null; then
+        echo -e "${YELLOW}ОСТАНОВЛЕН (ВКЛЮЧЕН)${NC}"
+    else
+        echo -e "${RED}ОСТАНОВЛЕН${NC}"
+    fi
+}
+
+get_csqtt_web_port() {
+    local port=""
+    if [ -f "$CSQTT_SERVICE_FILE" ]; then
+        port=$(grep -oP -- '--web-port\s+\K[0-9]+' "$CSQTT_SERVICE_FILE" 2>/dev/null || true)
+    fi
+    if [ -z "$port" ] && [ -f "$CSQTT_NET_UP" ]; then
+        port=$(grep -oP 'WEB_PORT="\K[0-9]+' "$CSQTT_NET_UP" 2>/dev/null || true)
+    fi
+    if [ -z "$port" ]; then
+        port=$(ss -tlpn 2>/dev/null | grep 'csqtt' | awk '{print $4}' | awk -F: '{print $NF}' | grep -v '46004' | head -n 1 || true)
+    fi
+    if [ -z "$port" ]; then
+        port="37002"
+    fi
+    echo "$port"
+}
+
+get_csqtt_peer_port() {
+    local port=""
+    if [ -f "$CSQTT_SERVICE_FILE" ]; then
+        port=$(grep -oP -- '--listen\s+0\.0\.0\.0:\K[0-9]+' "$CSQTT_SERVICE_FILE" 2>/dev/null || true)
+    fi
+    if [ -z "$port" ] && [ -f "$CSQTT_NET_UP" ]; then
+        port=$(grep -oP 'PEER_PORT="\K[0-9]+' "$CSQTT_NET_UP" 2>/dev/null || true)
+    fi
+    if [ -z "$port" ]; then
+        port=$(ss -ulpn 2>/dev/null | grep 'csqtt' | awk '{print $4}' | awk -F: '{print $NF}' | head -n 1 || true)
+    fi
+    if [ -z "$port" ]; then
+        port="37000"
+    fi
+    echo "$port"
+}
+
+get_ssh_port() {
+    local p=$(ss -tlnp 2>/dev/null | grep sshd | awk '{print $4}' | awk -F: '{print $NF}' | head -n 1)
+    if [ -z "$p" ]; then
+        p=$(grep -iE '^Port\s+' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null | awk '{print $2}' | head -n 1)
+    fi
+    [ -z "$p" ] && p="22"
+    echo "$p"
+}
+
+get_csqtt_user() {
+    if [ -f "$CSQTT_ENV_FILE" ]; then
+        local u=$(grep -oP '^CSQTT_WEB_USER="\K[^"]+' "$CSQTT_ENV_FILE" 2>/dev/null || true)
+        [ -n "$u" ] && echo "$u" && return
+    fi
+    echo "N/A"
+}
+
+get_csqtt_pass() {
+    if [ -f "$CSQTT_ENV_FILE" ]; then
+        local p=$(grep -oP '^CSQTT_WEB_PASS="\K[^"]+' "$CSQTT_ENV_FILE" 2>/dev/null || true)
+        [ -n "$p" ] && echo "$p" && return
+    fi
+    echo "N/A"
+}
+
+is_csqtt_web_protected() {
+    local port=$(get_csqtt_web_port)
+    if [ -f "$CSQTT_LOCK_FILE" ]; then
+        return 0
+    fi
+    if iptables -C INPUT ! -i lo -p tcp --dport "$port" -m comment --comment "CSQTT_SSH_ONLY" -j DROP 2>/dev/null; then
+        return 0
+    fi
+    if iptables -S INPUT 2>/dev/null | grep -E -- "-A INPUT.*-p tcp.*--dport ${port}.*-j DROP" >/dev/null 2>&1; then
+        return 0
+    fi
+    return 1
+}
+
+get_csqtt_protect_status() {
+    if ! is_csqtt_installed; then
+        echo -e "${RED}Не установлен${NC}"
+        return
+    fi
+    if is_csqtt_web_protected; then
+        echo -e "${GREEN}🔒 ЗАЩИЩЕНА (Только SSH-туннель)${NC}"
+    else
+        echo -e "${RED}⚠️ ОТКРЫТА (Прямой доступ из WAN)${NC}"
+    fi
+}
+
+csqtt_patch_network_up() {
+    [ -f "$CSQTT_NET_UP" ] || return 0
+    if grep -q "CSQTT_SSH_ONLY" "$CSQTT_NET_UP" 2>/dev/null; then
+        return 0
+    fi
+    python3 - << 'PYEOF' 2>/dev/null || true
+path = "/usr/local/lib/csqtt/network-up.sh"
+try:
+    with open(path, "r", encoding="utf-8") as f:
+        content = f.read()
+    
+    target = 'ipt -C INPUT -p tcp --dport "$WEB_PORT" -m comment --comment "$IPT_COMMENT" -j ACCEPT 2>/dev/null || ipt -I INPUT -p tcp --dport "$WEB_PORT" -m comment --comment "$IPT_COMMENT" -j ACCEPT'
+    replacement = '''if [ -f "/etc/csqtt/ssh_only.lock" ]; then
+    ipt -D INPUT -p tcp --dport "$WEB_PORT" -m comment --comment "$IPT_COMMENT" -j ACCEPT 2>/dev/null || true
+    ipt -C INPUT ! -i lo -p tcp --dport "$WEB_PORT" -m comment --comment "CSQTT_SSH_ONLY" -j DROP 2>/dev/null || ipt -I INPUT 1 ! -i lo -p tcp --dport "$WEB_PORT" -m comment --comment "CSQTT_SSH_ONLY" -j DROP
+else
+    ipt -D INPUT ! -i lo -p tcp --dport "$WEB_PORT" -m comment --comment "CSQTT_SSH_ONLY" -j DROP 2>/dev/null || true
+    ipt -C INPUT -p tcp --dport "$WEB_PORT" -m comment --comment "$IPT_COMMENT" -j ACCEPT 2>/dev/null || ipt -I INPUT -p tcp --dport "$WEB_PORT" -m comment --comment "$IPT_COMMENT" -j ACCEPT
+fi'''
+    if target in content:
+        content = content.replace(target, replacement, 1)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+except Exception:
+    pass
+PYEOF
+}
+
+csqtt_protect_web() {
+    local port=$(get_csqtt_web_port)
+    echo ""
+    echo -e "${YELLOW}Активация режима изоляции веб-панели CSQTT...${NC}"
+    mkdir -p "$CSQTT_DIR"
+    touch "$CSQTT_LOCK_FILE"
+
+    # Удаляем открытое правило ACCEPT
+    iptables -D INPUT -p tcp --dport "$port" -m comment --comment "CSQTT_MANAGED" -j ACCEPT 2>/dev/null || true
+    iptables -D INPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null || true
+
+    # Устанавливаем DROP в начало цепочки INPUT для всех интерфейсов кроме lo
+    iptables -D INPUT ! -i lo -p tcp --dport "$port" -m comment --comment "CSQTT_SSH_ONLY" -j DROP 2>/dev/null || true
+    iptables -I INPUT 1 ! -i lo -p tcp --dport "$port" -m comment --comment "CSQTT_SSH_ONLY" -j DROP
+
+    # Интегрируем проверку в network-up.sh для сохранения режима при рестартах
+    csqtt_patch_network_up
+
+    echo -e "${GREEN}✓ Защита веб-панели CSQTT успешно активирована!${NC}"
+    echo -e "  Порт ${BOLD}${port}/TCP${NC} теперь полностью закрыт от доступа из интернета."
+    echo -e "  Доступ открыт ${BOLD}только локально (127.0.0.1) через защищенный SSH-туннель${NC}."
+    echo ""
+}
+
+csqtt_unprotect_web() {
+    local port=$(get_csqtt_web_port)
+    echo ""
+    echo -e "${YELLOW}Открытие прямого доступа к веб-панели CSQTT...${NC}"
+    rm -f "$CSQTT_LOCK_FILE"
+
+    # Удаляем блокирующее правило DROP
+    iptables -D INPUT ! -i lo -p tcp --dport "$port" -m comment --comment "CSQTT_SSH_ONLY" -j DROP 2>/dev/null || true
+    iptables -D INPUT -i "$WAN_IF" -p tcp --dport "$port" -j DROP 2>/dev/null || true
+
+    # Восстанавливаем ACCEPT правило CSQTT_MANAGED
+    iptables -C INPUT -p tcp --dport "$port" -m comment --comment "CSQTT_MANAGED" -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport "$port" -m comment --comment "CSQTT_MANAGED" -j ACCEPT
+
+    # Интегрируем проверку в network-up.sh
+    csqtt_patch_network_up
+
+    echo -e "${GREEN}✓ Прямой доступ к веб-панели открыт.${NC}"
+    echo -e "  Адрес для входа из интернета: ${CYAN}https://${SERVER_IP}:${port}${NC}"
+    echo ""
+}
+
+show_csqtt_tunnel_card() {
+    local port=$(get_csqtt_web_port)
+    local peer_p=$(get_csqtt_peer_port)
+    local ssh_p=$(get_ssh_port)
+    local u=$(get_csqtt_user)
+    local p=$(get_csqtt_pass)
+
+    clear
+    echo -e "${CYAN}╔══════════════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${CYAN}║${BOLD}          БЕЗОПАСНЫЙ ДОСТУП К ВЕБ-ПАНЕЛИ CSQTT ЧЕРЕЗ SSH             ${CYAN}║${NC}"
+    echo -e "${CYAN}╚══════════════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    echo -e "${BOLD}Параметры сервера и панели:${NC}"
+    echo -e "  • IP сервера:       ${CYAN}${SERVER_IP}${NC}"
+    echo -e "  • SSH порт:         ${CYAN}${ssh_p}${NC}"
+    echo -e "  • Порт веб-панели:  ${CYAN}${port}/TCP${NC}"
+    echo -e "  • VPN порт туннеля: ${CYAN}${peer_p}/UDP${NC}"
+    echo -e "  • Текущий статус:   $(get_csqtt_protect_status)"
+    echo ""
+    echo -e "${BOLD}Учетные данные для авторизации в панели:${NC}"
+    echo -e "  • Логин:            ${GREEN}${u}${NC}"
+    echo -e "  • Пароль:           ${GREEN}${p}${NC}"
+    echo ""
+    echo -e "${CYAN}────────────────────────────────────────────────────────────────────────${NC}"
+    echo -e "${YELLOW}${BOLD}ШАГ 1: Запустите SSH-туннель на вашем ПК (в PowerShell или Терминале):${NC}"
+    echo ""
+    echo -e "  ${GREEN}${BOLD}ssh -N -L ${port}:127.0.0.1:${port} root@${SERVER_IP} -p ${ssh_p}${NC}"
+    echo ""
+    echo -e "  ${NC}💡 ${YELLOW}Что делают флаги:${NC}"
+    echo -e "     ${BOLD}-N${NC} : режим туннелирования (не открывать командную строку сервера)"
+    echo -e "     ${BOLD}-L ${port}:127.0.0.1:${port}${NC} : пробросить порт ${port} вашего ПК на порт панели сервера"
+    echo -e "     ${BOLD}-p ${ssh_p}${NC} : активный порт SSH на сервере"
+    echo ""
+    echo -e "${CYAN}────────────────────────────────────────────────────────────────────────${NC}"
+    echo -e "${YELLOW}${BOLD}ШАГ 2: Откройте браузер на вашем ПК и перейдите по адресу:${NC}"
+    echo ""
+    echo -e "  👉 ${CYAN}${BOLD}https://127.0.0.1:${port}${NC}"
+    echo ""
+    echo -e "  ${NC}⚠️ ${YELLOW}Важно при первом входе:${NC}"
+    echo -e "     Панель использует HTTPS с самоподписанным TLS-сертификатом."
+    echo -e "     Браузер выдаст предупреждение «Подключение не защищено»."
+    echo -e "     Нажмите кнопку «Дополнительно» -> «Перейти на 127.0.0.1 (небезопасно)»."
+    echo -e "${CYAN}────────────────────────────────────────────────────────────────────────${NC}"
+    echo ""
+    read -p "Нажмите Enter для возврата в меню..."
+}
+
+show_csqtt_header() {
+    clear
+    local port=$(get_csqtt_web_port)
+    local peer_p=$(get_csqtt_peer_port)
+    local u=$(get_csqtt_user)
+    echo -e "${CYAN}╔══════════════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${CYAN}║${BOLD}          УПРАВЛЕНИЕ СЛУЖБОЙ CSQTT И ЗАЩИТОЙ ВЕБ-ПАНЕЛИ             ${CYAN}║${NC}"
+    echo -e "${CYAN}╠══════════════════════════════════════════════════════════════════════╣${NC}"
+    echo -e "${CYAN}║${NC}  Сервер: ${BOLD}${SERVER_IP}${NC}  |  Статус: $(get_csqtt_status)"
+    echo -e "${CYAN}║${NC}  VPN туннель: ${BOLD}${peer_p}/UDP${NC}  |  Веб-панель: ${BOLD}${port}/TCP${NC}"
+    echo -e "${CYAN}║${NC}  Защита веб-панели: $(get_csqtt_protect_status)"
+    echo -e "${CYAN}║${NC}  Администратор: ${GREEN}${u}${NC}"
+    echo -e "${CYAN}╚══════════════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+}
+
+menu_csqtt() {
+    if ! is_csqtt_installed; then
+        clear
+        echo -e "${YELLOW}╔══════════════════════════════════════════════════════════════════════╗${NC}"
+        echo -e "${YELLOW}║${BOLD}                     CSQTT НЕ ОБНАРУЖЕН                               ${YELLOW}║${NC}"
+        echo -e "${YELLOW}╚══════════════════════════════════════════════════════════════════════╝${NC}"
+        echo ""
+        echo -e "${RED}Служба csqtt или исполняемый файл csqtt не найдены на данном сервере.${NC}"
+        echo ""
+        echo -e "Если вы установите CSQTT на этот сервер, данный раздел"
+        echo -e "активируется автоматически при следующем запуске x-manager."
+        echo ""
+        read -p "Нажмите Enter для возврата..."
+        return
+    fi
+
+    while true; do
+        show_csqtt_header
+        echo -e "  ${YELLOW}[1]${NC} 📊 Статус службы csqtt и активные сокеты"
+        echo -e "  ${YELLOW}[2]${NC} 🔒 ${BOLD}Включить защиту веб-панели${NC} (Доступ ТОЛЬКО через SSH-туннель)"
+        echo -e "  ${YELLOW}[3]${NC} 🔓 ${BOLD}Открыть прямой доступ из интернета${NC} (Доступ без туннеля)"
+        echo -e "  ${YELLOW}[4]${NC} 🔑 ${BOLD}Команда SSH-туннеля и параметры входа${NC} (Инструкция для ПК)"
+        echo -e "  ${YELLOW}[5]${NC} 📜 Живые логи службы csqtt (journalctl)"
+        echo -e "  ${YELLOW}[6]${NC} 🔄 Перезапустить службу csqtt"
+        echo -e "  ${YELLOW}[0]${NC} ⬅️  Назад в Главное Меню"
+        echo ""
+        read -p "Выберите пункт [0-6]: " c_choice
+        case "$c_choice" in
+            1)
+                show_csqtt_header
+                systemctl status csqtt --no-pager
+                echo ""
+                ss -tulpn | grep csqtt || echo "Сокеты csqtt не найдены"
+                echo ""
+                read -p "Нажмите Enter..."
+                ;;
+            2)
+                csqtt_protect_web
+                sleep 1
+                show_csqtt_tunnel_card
+                ;;
+            3)
+                csqtt_unprotect_web
+                sleep 2
+                ;;
+            4)
+                show_csqtt_tunnel_card
+                ;;
+            5)
+                journalctl -u csqtt -f -n 50
+                ;;
+            6)
+                echo -e "${YELLOW}Перезапуск службы csqtt...${NC}"
+                systemctl restart csqtt
+                sleep 2
+                echo -e "${GREEN}✓ Служба csqtt перезапущена${NC}"
+                sleep 1
+                ;;
+            0) return ;;
+        esac
+    done
+}
+
+# ==============================================================================
+# РАЗДЕЛ 5: ОБЩИЙ СТАТУС ВСЕХ СЛУЖБ
 # ==============================================================================
 view_global_status() {
     clear
@@ -1072,6 +1389,11 @@ view_global_status() {
     printf "  %-22s %-25b [Маршрут: %b]\n" "Mieru (mita):" "$(get_mieru_status)" "$(get_mieru_routing)"
     printf "  %-22s %-25b [Маршрут: %b]\n" "Snell (v5):" "$(get_snell_status)" "$(get_snell_routing)"
     printf "  %-22s %-25b [Маршрут: %b]\n" "WDTT (qwdtt):" "$(get_wdtt_status)" "$(get_wdtt_routing)"
+    if is_csqtt_installed; then
+        printf "  %-22s %-25b [Панель :%s | %b]\n" "CSQTT (VPN Server):" "$(get_csqtt_status)" "$(get_csqtt_web_port)" "$(get_csqtt_protect_status)"
+    else
+        printf "  %-22s %-25b\n" "CSQTT (VPN Server):" "$(get_csqtt_status)"
+    fi
     printf "  %-22s %s\n" "Xray Core (3X-UI):" "$(systemctl is-active x-ui 2>/dev/null || echo 'inactive')"
     echo ""
     echo -e "${BOLD}--- Внутренние шлюзы ядра Xray (Вход для прокси-служб) ---${NC}"
@@ -1081,24 +1403,30 @@ view_global_status() {
     echo ""
     echo -e "${BOLD}--- Открытые прослушиваемые порты ---${NC}"
     echo -e "${YELLOW}TCP порты:${NC}"
-    ss -tlpn | grep -E 'mita|snell|xray|wdtt|sshd' | awk '{printf "  %-6s %-22s %-25s\n", $1, $4, $NF}'
+    ss -tlpn | grep -E 'mita|snell|xray|wdtt|csqtt|sshd' | awk '{printf "  %-6s %-22s %-25s\n", $1, $4, $NF}'
     echo ""
     echo -e "${YELLOW}UDP порты:${NC}"
-    ss -ulpn | grep -E 'mita|snell|xray|wdtt' | head -n 14 | awk '{printf "  %-6s %-22s %-25s\n", $1, $4, $NF}'
+    ss -ulpn | grep -E 'mita|snell|xray|wdtt|csqtt' | head -n 16 | awk '{printf "  %-6s %-22s %-25s\n", $1, $4, $NF}'
     echo ""
     read -p "Нажмите Enter для возврата..."
 }
 
 restart_all_services() {
     clear
-    echo -e "${YELLOW}Перезапуск всех прокси и VPN служб (Mieru, Snell, WDTT)...${NC}"
-    systemctl restart mita
-    systemctl restart snell
-    systemctl restart wdtt
+    echo -e "${YELLOW}Перезапуск всех прокси и VPN служб (Mieru, Snell, WDTT, CSQTT)...${NC}"
+    systemctl restart mita 2>/dev/null || true
+    systemctl restart snell 2>/dev/null || true
+    systemctl restart wdtt 2>/dev/null || true
+    if is_csqtt_installed; then
+        systemctl restart csqtt 2>/dev/null || true
+    fi
     sleep 2
     echo -e "Mieru: $(get_mieru_status)"
     echo -e "Snell: $(get_snell_status)"
     echo -e "WDTT:  $(get_wdtt_status)"
+    if is_csqtt_installed; then
+        echo -e "CSQTT: $(get_csqtt_status)"
+    fi
     sleep 2
 }
 
@@ -1115,6 +1443,9 @@ main_hub() {
         exit 0
     elif [ "$invoked" = "x-wdtt" ] || [ "$invoked" = "x-qwdtt" ]; then
         menu_wdtt
+        exit 0
+    elif [ "$invoked" = "x-csqtt" ]; then
+        menu_csqtt
         exit 0
     fi
 
@@ -1136,23 +1467,33 @@ main_hub() {
         echo -e "${CYAN}║${NC}  ${BOLD}[3] 🛡️ WDTT / qwdtt${NC}          -> $(get_wdtt_status)"
         echo -e "${CYAN}║${NC}      Порты: 56000-56003       |  Пароль: ${GREEN}$(get_wdtt_password)${NC}"
         echo -e "${CYAN}║${NC}      Маршрут: $(get_wdtt_routing)"
+        echo -e "${CYAN}║${NC}"
+        if is_csqtt_installed; then
+            echo -e "${CYAN}║${NC}  ${BOLD}[4] 🔒 CSQTT (VPN & Web-панель)${NC}-> $(get_csqtt_status)"
+            echo -e "${CYAN}║${NC}      Веб-панель: :${BOLD}$(get_csqtt_web_port)/TCP${NC}   |  Защита: $(get_csqtt_protect_status)"
+            echo -e "${CYAN}║${NC}      VPN порт:   :${BOLD}$(get_csqtt_peer_port)/UDP${NC}"
+        else
+            echo -e "${CYAN}║${NC}  ${BOLD}[4] 🔒 CSQTT (VPN & Web-панель)${NC}-> ${RED}НЕ УСТАНОВЛЕН${NC}"
+        fi
         echo -e "${CYAN}╚══════════════════════════════════════════════════════════════════════╝${NC}"
         echo ""
         echo -e "  ${GREEN}${BOLD}[1]${NC} 🚀 ${BOLD}Управление Mieru${NC} (Anti-TSPU, Egress, пользователи, порты)"
         echo -e "  ${BLUE}${BOLD}[2]${NC} ⚡ ${BOLD}Управление Snell v5${NC} (0-RTT, Egress Xray/Direct, HTTP-obfs, PSK)"
         echo -e "  ${PURPLE}${BOLD}[3]${NC} 🛡️ ${BOLD}Управление WDTT / qwdtt${NC} (Egress в ядро / Прямой выход, клиенты)"
+        echo -e "  ${CYAN}${BOLD}[4]${NC} 🔒 ${BOLD}Управление CSQTT${NC} (Защита веб-панели, SSH-туннель, статус)"
         echo ""
-        echo -e "  ${YELLOW}[4]${NC} 📊 Сводный статус всех служб и портов сервера"
-        echo -e "  ${YELLOW}[5]${NC} 🔄 Перезапустить все сервисы (Mieru + Snell + WDTT)"
+        echo -e "  ${YELLOW}[5]${NC} 📊 Сводный статус всех служб и портов сервера"
+        echo -e "  ${YELLOW}[6]${NC} 🔄 Перезапустить все сервисы (Mieru + Snell + WDTT + CSQTT)"
         echo -e "  ${YELLOW}[0]${NC} 🚪 Выход"
         echo ""
-        read -p "Выберите раздел [0-5]: " top_choice
+        read -p "Выберите раздел [0-6]: " top_choice
         case "$top_choice" in
             1) menu_mieru ;;
             2) menu_snell ;;
             3) menu_wdtt ;;
-            4) view_global_status ;;
-            5) restart_all_services ;;
+            4) menu_csqtt ;;
+            5) view_global_status ;;
+            6) restart_all_services ;;
             0) clear; exit 0 ;;
             *) echo "Неверный выбор"; sleep 1 ;;
         esac

@@ -614,6 +614,7 @@ ln -sf /usr/local/bin/x-manager /usr/local/bin/x-snell
 ln -sf /usr/local/bin/x-manager /usr/local/bin/x-mieru
 ln -sf /usr/local/bin/x-manager /usr/local/bin/x-wdtt
 ln -sf /usr/local/bin/x-manager /usr/local/bin/x-qwdtt
+ln -sf /usr/local/bin/x-manager /usr/local/bin/x-csqtt
 
 echo ""
 echo -e "${GREEN}${BOLD}══════════════════════════════════════════════════════════════════════${NC}"
@@ -625,6 +626,7 @@ echo -e "  ${CYAN}${BOLD}x-manager${NC}   - Главный центр управ
 echo -e "  ${YELLOW}x-snell${NC}     - Раздел управления Snell v5"
 echo -e "  ${YELLOW}x-mieru${NC}     - Раздел управления Mieru"
 echo -e "  ${YELLOW}x-wdtt${NC}      - Раздел управления WDTT (qwdtt)"
+echo -e "  ${YELLOW}x-csqtt${NC}     - Раздел управления CSQTT (VPN & Защита веб-панели)"
 echo ""
 echo -e "${BOLD}Шлюзы ядра Xray (подхваченные/настроенные):${NC}"
 echo -e "  • TPROXY:   127.0.0.1:${XRAY_TPROXY_PORT}"
