@@ -670,7 +670,7 @@ else
 fi
 chmod +x /usr/local/bin/x-manager
 
-echo -e "  -> Создание системных алиасов (x-snell, x-mieru, x-wdtt, x-csqtt, x-dns)..."
+echo -e "  -> Создание системных алиасов (x-snell, x-mieru, x-wdtt, x-csqtt, x-dns, x-fw)..."
 ln -sf /usr/local/bin/x-manager /usr/local/bin/x-snell
 ln -sf /usr/local/bin/x-manager /usr/local/bin/x-mieru
 ln -sf /usr/local/bin/x-manager /usr/local/bin/x-wdtt
@@ -679,6 +679,8 @@ ln -sf /usr/local/bin/x-manager /usr/local/bin/x-csqtt
 ln -sf /usr/local/bin/x-manager /usr/local/bin/x-dns
 ln -sf /usr/local/bin/x-manager /usr/local/bin/x-cottendns
 ln -sf /usr/local/bin/x-manager /usr/local/bin/x-masterdns
+ln -sf /usr/local/bin/x-manager /usr/local/bin/x-fw
+ln -sf /usr/local/bin/x-manager /usr/local/bin/x-firewall
 echo -e "  ✓ Диспетчер x-manager успешно развернут"
 
 echo ""
@@ -693,6 +695,7 @@ echo -e "  ${YELLOW}x-mieru${NC}     - Раздел управления Mieru"
 echo -e "  ${YELLOW}x-wdtt${NC}      - Раздел управления WDTT (qwdtt)"
 echo -e "  ${YELLOW}x-csqtt${NC}     - Раздел управления CSQTT (VPN & Защита веб-панели)"
 echo -e "  ${YELLOW}x-dns${NC}       - Раздел управления DNS-туннелями (CottenDNS / MasterDnsVPN)"
+echo -e "  ${RED}x-fw${NC}        - Центр управления фаерволом портов (отключение протоколов)"
 echo ""
 echo -e "${BOLD}Шлюзы ядра Xray (подхваченные/настроенные):${NC}"
 echo -e "  • TPROXY:   127.0.0.1:${XRAY_TPROXY_PORT}"

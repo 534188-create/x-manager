@@ -55,6 +55,10 @@ MASTERDNS_KEY_FILE="/etc/masterdns/encrypt_key.txt"
 MASTERDNS_SERVICE="masterdns"
 
 DNS_WAN_LOCK="/etc/x-manager/dns_wan_blocked.lock"
+MIERU_FW_LOCK="/etc/x-manager/mieru_fw_blocked.lock"
+SNELL_FW_LOCK="/etc/x-manager/snell_fw_blocked.lock"
+WDTT_FW_LOCK="/etc/x-manager/wdtt_fw_blocked.lock"
+CSQTT_TUNNEL_LOCK="/etc/x-manager/csqtt_tunnel_blocked.lock"
 
 
 WAN_IF=$(ip route show default 2>/dev/null | awk '{print $5}' | head -n 1)
@@ -76,6 +80,10 @@ is_snell_installed() {
 
 is_wdtt_installed() {
     command -v wdtt >/dev/null 2>&1 || [ -f "/etc/systemd/system/wdtt.service" ] || [ -d "$WDTT_DIR" ]
+}
+
+is_csqtt_installed() {
+    command -v csqtt >/dev/null 2>&1 || [ -f "$CSQTT_SERVICE_FILE" ] || [ -d "$CSQTT_DIR" ]
 }
 
 is_cottendns_installed() {
@@ -389,6 +397,317 @@ restart_wdtt_and_verify() {
     fi
 }
 
+# ------------------------------------------------------------------------------
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ: ФАЕРВОЛ И БЛОКИРОВКА ПОРТОВ (IPTABLES)
+# ------------------------------------------------------------------------------
+
+# --- Mieru Firewall ---
+is_mieru_fw_blocked() {
+    [ -f "$MIERU_FW_LOCK" ] && return 0
+    if iptables -S INPUT 2>/dev/null | grep -q -- "-m comment --comment \"MIERU_FW_BLOCK\" -j DROP"; then
+        return 0
+    fi
+    return 1
+}
+
+get_mieru_fw_status() {
+    if ! is_mieru_installed; then
+        echo -e "${RED}Не установлен${NC}"
+        return
+    fi
+    if is_mieru_fw_blocked; then
+        echo -e "${RED}🔴 ЗАКРЫТ (DROP)${NC}"
+    else
+        echo -e "${GREEN}🟢 ОТКРЫТ (Прием трафика)${NC}"
+    fi
+}
+
+toggle_mieru_fw() {
+    local cur_ports_str=$(get_mieru_ports)
+    local ports=$(echo "$cur_ports_str" | cut -d'/' -f1)
+    local proto=$(echo "$cur_ports_str" | cut -d'/' -f2 | tr '[:upper:]' '[:lower:]')
+    [ -z "$proto" ] && proto="tcp"
+    [ -z "$ports" ] && ports="2020-2030"
+    local ipt_ports="$ports"
+    if [[ "$ports" =~ - ]]; then
+        local p_start=$(echo "$ports" | cut -d'-' -f1)
+        local p_end=$(echo "$ports" | cut -d'-' -f2)
+        ipt_ports="${p_start}:${p_end}"
+    fi
+
+    echo ""
+    if is_mieru_fw_blocked; then
+        echo -e "${YELLOW}Открытие портов Mieru (${ports}/${proto}) в фаерволе...${NC}"
+        while iptables -D INPUT -i "$WAN_IF" -p "$proto" --dport "$ipt_ports" -m comment --comment "MIERU_FW_BLOCK" -j DROP 2>/dev/null; do :; done
+        while iptables -D INPUT -p "$proto" --dport "$ipt_ports" -m comment --comment "MIERU_FW_BLOCK" -j DROP 2>/dev/null; do :; done
+        rm -f "$MIERU_FW_LOCK"
+        iptables -C INPUT -p "$proto" --dport "$ipt_ports" -m comment --comment "MIERU_MANAGED" -j ACCEPT 2>/dev/null || iptables -I INPUT -p "$proto" --dport "$ipt_ports" -m comment --comment "MIERU_MANAGED" -j ACCEPT
+        echo -e "${GREEN}✓ Порты Mieru (${ports}/${proto}) успешно ОТКРЫТЫ в фаерволе!${NC}"
+    else
+        echo -e "${YELLOW}Блокировка портов Mieru (${ports}/${proto}) в фаерволе...${NC}"
+        mkdir -p /etc/x-manager
+        touch "$MIERU_FW_LOCK"
+        iptables -D INPUT -p "$proto" --dport "$ipt_ports" -m comment --comment "MIERU_MANAGED" -j ACCEPT 2>/dev/null || true
+        iptables -D INPUT -p "$proto" --dport "$ipt_ports" -j ACCEPT 2>/dev/null || true
+        while iptables -D INPUT -i "$WAN_IF" -p "$proto" --dport "$ipt_ports" -m comment --comment "MIERU_FW_BLOCK" -j DROP 2>/dev/null; do :; done
+        iptables -I INPUT 1 -i "$WAN_IF" -p "$proto" --dport "$ipt_ports" -m comment --comment "MIERU_FW_BLOCK" -j DROP
+        echo -e "${RED}✓ Порты Mieru (${ports}/${proto}) успешно ЗАБЛОКИРОВАНЫ в фаерволе (DROP)!${NC}"
+    fi
+    sleep 1.5
+}
+
+# --- Snell Firewall ---
+is_snell_fw_blocked() {
+    [ -f "$SNELL_FW_LOCK" ] && return 0
+    if iptables -S INPUT 2>/dev/null | grep -q -- "-m comment --comment \"SNELL_FW_BLOCK\" -j DROP"; then
+        return 0
+    fi
+    return 1
+}
+
+get_snell_fw_status() {
+    if ! is_snell_installed; then
+        echo -e "${RED}Не установлен${NC}"
+        return
+    fi
+    if is_snell_fw_blocked; then
+        echo -e "${RED}🔴 ЗАКРЫТ (DROP)${NC}"
+    else
+        echo -e "${GREEN}🟢 ОТКРЫТ (Прием трафика)${NC}"
+    fi
+}
+
+toggle_snell_fw() {
+    local port=$(get_snell_port)
+    [ -z "$port" ] && port="1488"
+    echo ""
+    if is_snell_fw_blocked; then
+        echo -e "${YELLOW}Открытие порта Snell v5 (:${port} TCP+UDP) в фаерволе...${NC}"
+        while iptables -D INPUT -i "$WAN_IF" -p tcp --dport "$port" -m comment --comment "SNELL_FW_BLOCK" -j DROP 2>/dev/null; do :; done
+        while iptables -D INPUT -i "$WAN_IF" -p udp --dport "$port" -m comment --comment "SNELL_FW_BLOCK" -j DROP 2>/dev/null; do :; done
+        while iptables -D INPUT -p tcp --dport "$port" -m comment --comment "SNELL_FW_BLOCK" -j DROP 2>/dev/null; do :; done
+        while iptables -D INPUT -p udp --dport "$port" -m comment --comment "SNELL_FW_BLOCK" -j DROP 2>/dev/null; do :; done
+        rm -f "$SNELL_FW_LOCK"
+        iptables -C INPUT -p tcp --dport "$port" -m comment --comment "SNELL_MANAGED" -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport "$port" -m comment --comment "SNELL_MANAGED" -j ACCEPT
+        iptables -C INPUT -p udp --dport "$port" -m comment --comment "SNELL_MANAGED" -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport "$port" -m comment --comment "SNELL_MANAGED" -j ACCEPT
+        echo -e "${GREEN}✓ Порт Snell v5 (:${port} TCP+UDP) успешно ОТКРЫТ в фаерволе!${NC}"
+    else
+        echo -e "${YELLOW}Блокировка порта Snell v5 (:${port} TCP+UDP) в фаерволе...${NC}"
+        mkdir -p /etc/x-manager
+        touch "$SNELL_FW_LOCK"
+        iptables -D INPUT -p tcp --dport "$port" -m comment --comment "SNELL_MANAGED" -j ACCEPT 2>/dev/null || true
+        iptables -D INPUT -p udp --dport "$port" -m comment --comment "SNELL_MANAGED" -j ACCEPT 2>/dev/null || true
+        iptables -D INPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null || true
+        iptables -D INPUT -p udp --dport "$port" -j ACCEPT 2>/dev/null || true
+        while iptables -D INPUT -i "$WAN_IF" -p tcp --dport "$port" -m comment --comment "SNELL_FW_BLOCK" -j DROP 2>/dev/null; do :; done
+        while iptables -D INPUT -i "$WAN_IF" -p udp --dport "$port" -m comment --comment "SNELL_FW_BLOCK" -j DROP 2>/dev/null; do :; done
+        iptables -I INPUT 1 -i "$WAN_IF" -p tcp --dport "$port" -m comment --comment "SNELL_FW_BLOCK" -j DROP
+        iptables -I INPUT 1 -i "$WAN_IF" -p udp --dport "$port" -m comment --comment "SNELL_FW_BLOCK" -j DROP
+        echo -e "${RED}✓ Порт Snell v5 (:${port} TCP+UDP) успешно ЗАБЛОКИРОВАН в фаерволе (DROP)!${NC}"
+    fi
+    sleep 1.5
+}
+
+# --- WDTT Firewall ---
+is_wdtt_fw_blocked() {
+    [ -f "$WDTT_FW_LOCK" ] && return 0
+    if iptables -S INPUT 2>/dev/null | grep -q -- "-m comment --comment \"WDTT_FW_BLOCK\" -j DROP"; then
+        return 0
+    fi
+    return 1
+}
+
+get_wdtt_fw_status() {
+    if ! is_wdtt_installed; then
+        echo -e "${RED}Не установлен${NC}"
+        return
+    fi
+    if is_wdtt_fw_blocked; then
+        echo -e "${RED}🔴 ЗАКРЫТ (DROP)${NC}"
+    else
+        echo -e "${GREEN}🟢 ОТКРЫТ (Прием трафика)${NC}"
+    fi
+}
+
+toggle_wdtt_fw() {
+    local peer_p=$(get_wdtt_peer_port)
+    [ -z "$peer_p" ] && peer_p="56000"
+    echo ""
+    if is_wdtt_fw_blocked; then
+        echo -e "${YELLOW}Открытие портов WDTT / qwdtt в фаерволе...${NC}"
+        while iptables -D INPUT -i "$WAN_IF" -p udp --dport "$peer_p" -m comment --comment "WDTT_FW_BLOCK" -j DROP 2>/dev/null; do :; done
+        while iptables -D INPUT -i "$WAN_IF" -p tcp --dport "$peer_p" -m comment --comment "WDTT_FW_BLOCK" -j DROP 2>/dev/null; do :; done
+        while iptables -D INPUT -i "$WAN_IF" -p tcp --dport 56002 -m comment --comment "WDTT_FW_BLOCK" -j DROP 2>/dev/null; do :; done
+        while iptables -D INPUT -i "$WAN_IF" -p udp --dport 56002 -m comment --comment "WDTT_FW_BLOCK" -j DROP 2>/dev/null; do :; done
+        while iptables -D INPUT -i "$WAN_IF" -p udp --dport 56003 -m comment --comment "WDTT_FW_BLOCK" -j DROP 2>/dev/null; do :; done
+        while iptables -D INPUT -p udp --dport "$peer_p" -m comment --comment "WDTT_FW_BLOCK" -j DROP 2>/dev/null; do :; done
+        while iptables -D INPUT -p tcp --dport "$peer_p" -m comment --comment "WDTT_FW_BLOCK" -j DROP 2>/dev/null; do :; done
+        rm -f "$WDTT_FW_LOCK"
+        iptables -C INPUT -p udp --dport "$peer_p" -m comment --comment "WDTT_MANAGED" -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport "$peer_p" -m comment --comment "WDTT_MANAGED" -j ACCEPT
+        iptables -C INPUT -p tcp --dport "$peer_p" -m comment --comment "WDTT_MANAGED" -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport "$peer_p" -m comment --comment "WDTT_MANAGED" -j ACCEPT
+        iptables -C INPUT -p tcp --dport 56002 -m comment --comment "WDTT_MANAGED" -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport 56002 -m comment --comment "WDTT_MANAGED" -j ACCEPT
+        iptables -C INPUT -p udp --dport 56002 -m comment --comment "WDTT_MANAGED" -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport 56002 -m comment --comment "WDTT_MANAGED" -j ACCEPT
+        iptables -C INPUT -p udp --dport 56003 -m comment --comment "WDTT_MANAGED" -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport 56003 -m comment --comment "WDTT_MANAGED" -j ACCEPT
+        echo -e "${GREEN}✓ Порты WDTT (VPN:${peer_p}, Direct:56002, Raw:56003) успешно ОТКРЫТЫ в фаерволе!${NC}"
+    else
+        echo -e "${YELLOW}Блокировка портов WDTT / qwdtt в фаерволе...${NC}"
+        mkdir -p /etc/x-manager
+        touch "$WDTT_FW_LOCK"
+        iptables -D INPUT -p udp --dport "$peer_p" -m comment --comment "WDTT_MANAGED" -j ACCEPT 2>/dev/null || true
+        iptables -D INPUT -p tcp --dport "$peer_p" -m comment --comment "WDTT_MANAGED" -j ACCEPT 2>/dev/null || true
+        iptables -D INPUT -p tcp --dport 56002 -m comment --comment "WDTT_MANAGED" -j ACCEPT 2>/dev/null || true
+        iptables -D INPUT -p udp --dport 56002 -m comment --comment "WDTT_MANAGED" -j ACCEPT 2>/dev/null || true
+        iptables -D INPUT -p udp --dport 56003 -m comment --comment "WDTT_MANAGED" -j ACCEPT 2>/dev/null || true
+        while iptables -D INPUT -i "$WAN_IF" -p udp --dport "$peer_p" -m comment --comment "WDTT_FW_BLOCK" -j DROP 2>/dev/null; do :; done
+        while iptables -D INPUT -i "$WAN_IF" -p tcp --dport "$peer_p" -m comment --comment "WDTT_FW_BLOCK" -j DROP 2>/dev/null; do :; done
+        while iptables -D INPUT -i "$WAN_IF" -p tcp --dport 56002 -m comment --comment "WDTT_FW_BLOCK" -j DROP 2>/dev/null; do :; done
+        while iptables -D INPUT -i "$WAN_IF" -p udp --dport 56002 -m comment --comment "WDTT_FW_BLOCK" -j DROP 2>/dev/null; do :; done
+        while iptables -D INPUT -i "$WAN_IF" -p udp --dport 56003 -m comment --comment "WDTT_FW_BLOCK" -j DROP 2>/dev/null; do :; done
+        iptables -I INPUT 1 -i "$WAN_IF" -p udp --dport "$peer_p" -m comment --comment "WDTT_FW_BLOCK" -j DROP
+        iptables -I INPUT 1 -i "$WAN_IF" -p tcp --dport "$peer_p" -m comment --comment "WDTT_FW_BLOCK" -j DROP
+        iptables -I INPUT 1 -i "$WAN_IF" -p tcp --dport 56002 -m comment --comment "WDTT_FW_BLOCK" -j DROP
+        iptables -I INPUT 1 -i "$WAN_IF" -p udp --dport 56002 -m comment --comment "WDTT_FW_BLOCK" -j DROP
+        iptables -I INPUT 1 -i "$WAN_IF" -p udp --dport 56003 -m comment --comment "WDTT_FW_BLOCK" -j DROP
+        echo -e "${RED}✓ Порты WDTT (VPN:${peer_p}, Direct:56002, Raw:56003) успешно ЗАБЛОКИРОВАНЫ в фаерволе (DROP)!${NC}"
+    fi
+    sleep 1.5
+}
+
+# --- CSQTT Tunnel Firewall ---
+is_csqtt_tunnel_blocked() {
+    [ -f "$CSQTT_TUNNEL_LOCK" ] && return 0
+    if iptables -S INPUT 2>/dev/null | grep -q -- "-m comment --comment \"CSQTT_TUNNEL_BLOCK\" -j DROP"; then
+        return 0
+    fi
+    return 1
+}
+
+get_csqtt_tunnel_status() {
+    if ! is_csqtt_installed; then
+        echo -e "${RED}Не установлен${NC}"
+        return
+    fi
+    if is_csqtt_tunnel_blocked; then
+        echo -e "${RED}🔴 ЗАКРЫТ (DROP)${NC}"
+    else
+        echo -e "${GREEN}🟢 ОТКРЫТ (Прием трафика)${NC}"
+    fi
+}
+
+toggle_csqtt_tunnel_fw() {
+    local peer_p=$(get_csqtt_peer_port)
+    [ -z "$peer_p" ] && peer_p="37000"
+    echo ""
+    if is_csqtt_tunnel_blocked; then
+        echo -e "${YELLOW}Открытие порта VPN-туннеля CSQTT (:${peer_p}/UDP) в фаерволе...${NC}"
+        while iptables -D INPUT -i "$WAN_IF" -p udp --dport "$peer_p" -m comment --comment "CSQTT_TUNNEL_BLOCK" -j DROP 2>/dev/null; do :; done
+        while iptables -D INPUT -p udp --dport "$peer_p" -m comment --comment "CSQTT_TUNNEL_BLOCK" -j DROP 2>/dev/null; do :; done
+        rm -f "$CSQTT_TUNNEL_LOCK"
+        iptables -C INPUT -p udp --dport "$peer_p" -m comment --comment "CSQTT_MANAGED" -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport "$peer_p" -m comment --comment "CSQTT_MANAGED" -j ACCEPT
+        echo -e "${GREEN}✓ Порт VPN-туннеля CSQTT (:${peer_p}/UDP) успешно ОТКРЫТ в фаерволе!${NC}"
+    else
+        echo -e "${YELLOW}Блокировка порта VPN-туннеля CSQTT (:${peer_p}/UDP) в фаерволе...${NC}"
+        mkdir -p /etc/x-manager
+        touch "$CSQTT_TUNNEL_LOCK"
+        iptables -D INPUT -p udp --dport "$peer_p" -m comment --comment "CSQTT_MANAGED" -j ACCEPT 2>/dev/null || true
+        iptables -D INPUT -p udp --dport "$peer_p" -j ACCEPT 2>/dev/null || true
+        while iptables -D INPUT -i "$WAN_IF" -p udp --dport "$peer_p" -m comment --comment "CSQTT_TUNNEL_BLOCK" -j DROP 2>/dev/null; do :; done
+        iptables -I INPUT 1 -i "$WAN_IF" -p udp --dport "$peer_p" -m comment --comment "CSQTT_TUNNEL_BLOCK" -j DROP
+        echo -e "${RED}✓ Порт VPN-туннеля CSQTT (:${peer_p}/UDP) успешно ЗАБЛОКИРОВАН в фаерволе (DROP)!${NC}"
+    fi
+    sleep 1.5
+}
+
+lock_all_protocols_fw() {
+    echo ""
+    echo -e "${RED}${BOLD}ВНИМАНИЕ: Блокировка портов всех протоколов в фаерволе (Panic Mode)...${NC}"
+    is_mieru_installed && ! is_mieru_fw_blocked && toggle_mieru_fw
+    is_snell_installed && ! is_snell_fw_blocked && toggle_snell_fw
+    is_wdtt_installed && ! is_wdtt_fw_blocked && toggle_wdtt_fw
+    is_csqtt_installed && ! is_csqtt_tunnel_blocked && toggle_csqtt_tunnel_fw
+    is_dns_installed && ! is_dns_wan_blocked && toggle_dns_wan
+    echo -e "${RED}${BOLD}✓ Все протоколы успешно заблокированы в фаерволе (порты закрыты)!${NC}"
+    sleep 2
+}
+
+unlock_all_protocols_fw() {
+    echo ""
+    echo -e "${GREEN}${BOLD}Открытие портов всех установленных протоколов в фаерволе...${NC}"
+    is_mieru_installed && is_mieru_fw_blocked && toggle_mieru_fw
+    is_snell_installed && is_snell_fw_blocked && toggle_snell_fw
+    is_wdtt_installed && is_wdtt_fw_blocked && toggle_wdtt_fw
+    is_csqtt_installed && is_csqtt_tunnel_blocked && toggle_csqtt_tunnel_fw
+    is_dns_installed && is_dns_wan_blocked && toggle_dns_wan
+    echo -e "${GREEN}${BOLD}✓ Все протоколы успешно разблокированы в фаерволе (порты открыты)!${NC}"
+    sleep 2
+}
+
+menu_firewall() {
+    while true; do
+        clear
+        echo -e "${CYAN}╔══════════════════════════════════════════════════════════════════════╗${NC}"
+        echo -e "${CYAN}║${BOLD}          ЦЕНТР УПРАВЛЕНИЯ ФАЕРВОЛОМ ПОРТОВ (IPTABLES)                ${CYAN}║${NC}"
+        echo -e "${CYAN}╠══════════════════════════════════════════════════════════════════════╣${NC}"
+        echo -e "${CYAN}║${NC}  Сервер:    ${BOLD}${SERVER_IP}${NC}  |  WAN Интерфейс: ${BOLD}${WAN_IF}${NC}"
+        echo -e "${CYAN}║${NC}"
+        if is_mieru_installed; then
+            echo -e "${CYAN}║${NC}  [1] 🚀 Mieru (mita):         $(get_mieru_fw_status) [$(get_mieru_ports)]"
+        fi
+        if is_snell_installed; then
+            echo -e "${CYAN}║${NC}  [2] ⚡ Snell v5:             $(get_snell_fw_status) [$(get_snell_port)/TCP+UDP]"
+        fi
+        if is_wdtt_installed; then
+            echo -e "${CYAN}║${NC}  [3] 🛡️ WDTT / qwdtt:         $(get_wdtt_fw_status) [$(get_wdtt_peer_port)/UDP]"
+        fi
+        if is_csqtt_installed; then
+            echo -e "${CYAN}║${NC}  [4] 🔒 CSQTT (VPN-туннель):   $(get_csqtt_tunnel_status) [$(get_csqtt_peer_port)/UDP]"
+            echo -e "${CYAN}║${NC}  [5] 🌐 CSQTT (Веб-панель):   $(get_csqtt_protect_status) [$(get_csqtt_web_port)/TCP]"
+        fi
+        if is_dns_installed; then
+            echo -e "${CYAN}║${NC}  [6] 🌐 DNS-туннель:          $(get_dns_wan_status) [:53 UDP/TCP]"
+        fi
+        echo -e "${CYAN}╚══════════════════════════════════════════════════════════════════════╝${NC}"
+        echo ""
+        echo -e "  ${BOLD}--- Переключение отдельных протоколов ---${NC}"
+        is_mieru_installed && echo -e "  ${YELLOW}[1]${NC} 🚀 Переключить фаервол Mieru"
+        is_snell_installed && echo -e "  ${YELLOW}[2]${NC} ⚡ Переключить фаервол Snell v5"
+        is_wdtt_installed && echo -e "  ${YELLOW}[3]${NC} 🛡️  Переключить фаервол WDTT / qwdtt"
+        if is_csqtt_installed; then
+            echo -e "  ${YELLOW}[4]${NC} 🔒 Переключить фаервол VPN-туннеля CSQTT"
+            echo -e "  ${YELLOW}[5]${NC} 🌐 Переключить защиту веб-панели CSQTT (SSH-туннель / Открыта)"
+        fi
+        is_dns_installed && echo -e "  ${YELLOW}[6]${NC} 🌐 Переключить фаервол DNS-туннеля (WAN :53)"
+        echo ""
+        echo -e "  ${BOLD}--- Групповые действия ---${NC}"
+        echo -e "  ${RED}${BOLD}[7]${NC} ⛔ ${BOLD}ЗАБЛОКИРОВАТЬ ВСЕ ПРОТОКОЛЫ (Полный локдаун портов)${NC}"
+        echo -e "  ${GREEN}${BOLD}[8]${NC} 🟢 ${BOLD}РАЗБЛОКИРОВАТЬ ВСЕ ПРОТОКОЛЫ (Открыть штатный доступ)${NC}"
+        echo -e "  ${YELLOW}[0]${NC} ⬅️  Назад в Главное Меню"
+        echo ""
+        read -p "Выберите действие [0-8]: " fw_act
+        case "$fw_act" in
+            1) is_mieru_installed && toggle_mieru_fw ;;
+            2) is_snell_installed && toggle_snell_fw ;;
+            3) is_wdtt_installed && toggle_wdtt_fw ;;
+            4) is_csqtt_installed && toggle_csqtt_tunnel_fw ;;
+            5)
+                if is_csqtt_installed; then
+                    if is_csqtt_web_protected; then
+                        csqtt_unprotect_web
+                    else
+                        csqtt_protect_web
+                    fi
+                    sleep 2
+                fi
+                ;;
+            6) is_dns_installed && toggle_dns_wan ;;
+            7) lock_all_protocols_fw ;;
+            8) unlock_all_protocols_fw ;;
+            0) return ;;
+            *) echo "Неверный выбор"; sleep 1 ;;
+        esac
+    done
+}
+
 # ==============================================================================
 # РАЗДЕЛ 1: УПРАВЛЕНИЕ MIERU
 # ==============================================================================
@@ -399,7 +718,7 @@ show_mieru_header() {
     echo -e "${CYAN}╠══════════════════════════════════════════════════════════════════════╣${NC}"
     echo -e "${CYAN}║${NC}  Сервер:     ${BOLD}${SERVER_IP}${NC}  |  Служба: $(get_mieru_status)"
     echo -e "${CYAN}║${NC}  Имя:        ${BOLD}$(get_mieru_tag)${NC}  |  Обфускация: $(get_mieru_preset)"
-    echo -e "${CYAN}║${NC}  Порты:      ${BOLD}$(get_mieru_ports)${NC}"
+    echo -e "${CYAN}║${NC}  Порты:      ${BOLD}$(get_mieru_ports)${NC}  |  Фаервол: $(get_mieru_fw_status)"
     echo -e "${CYAN}║${NC}  Маршрут:    $(get_mieru_routing)"
     echo -e "${CYAN}╚══════════════════════════════════════════════════════════════════════╝${NC}"
     echo ""
@@ -816,9 +1135,10 @@ menu_mieru() {
         echo -e "  ${YELLOW}[7]${NC} 📱 Экспорт конфигурации (Данные, Ссылка, QR-код)"
         echo -e "  ${YELLOW}[8]${NC} 📜 Живые логи службы (journalctl)"
         echo -e "  ${YELLOW}[9]${NC} 🔄 Перезапустить службу mita"
+        echo -e "  ${YELLOW}[10]${NC} 🔒 ${BOLD}Управление доступом в фаерволе${NC} ($(get_mieru_fw_status))"
         echo -e "  ${YELLOW}[0]${NC} ⬅️  Назад в Главное Меню"
         echo ""
-        read -p "Выберите пункт [0-9]: " m_choice
+        read -p "Выберите пункт [0-10]: " m_choice
         case "$m_choice" in
             1)
                 show_mieru_header
@@ -836,6 +1156,7 @@ menu_mieru() {
             7) mieru_export_links ;;
             8) journalctl -u mita -f -n 50 ;;
             9) restart_mieru_and_verify; sleep 2 ;;
+            10) toggle_mieru_fw ;;
             0) return ;;
             *) echo "Неверный выбор"; sleep 1 ;;
         esac
@@ -852,8 +1173,8 @@ show_snell_header() {
     echo -e "${CYAN}╠══════════════════════════════════════════════════════════════════════╣${NC}"
     echo -e "${CYAN}║${NC}  Сервер:  ${BOLD}${SERVER_IP}${NC}  |  Служба: $(get_snell_status)"
     echo -e "${CYAN}║${NC}  Имя:     ${BOLD}$(get_snell_tag)${NC}  |  Протокол: ${BOLD}Snell v5.0.1${NC}"
-    echo -e "${CYAN}║${NC}  Порт:    ${BOLD}$(get_snell_port)${NC} (TCP+UDP QUIC)  |  Обфускация: $(get_snell_obfs)"
-    echo -e "${CYAN}║${NC}  Маршрут: $(get_snell_routing)"
+    echo -e "${CYAN}║${NC}  Порт:    ${BOLD}$(get_snell_port)${NC} (TCP+UDP QUIC)  |  Фаервол: $(get_snell_fw_status)"
+    echo -e "${CYAN}║${NC}  Маршрут: $(get_snell_routing)  |  Обфускация: $(get_snell_obfs)"
     echo -e "${CYAN}╚══════════════════════════════════════════════════════════════════════╝${NC}"
     echo ""
 }
@@ -1068,9 +1389,10 @@ menu_snell() {
         echo -e "  ${YELLOW}[7]${NC} 📱 Конфигурация для NekoBox+ / Surge (Параметры, Ссылка, QR)"
         echo -e "  ${YELLOW}[8]${NC} 📜 Живые логи службы (journalctl)"
         echo -e "  ${YELLOW}[9]${NC} 🔄 Перезапустить службу snell"
+        echo -e "  ${YELLOW}[10]${NC} 🔒 ${BOLD}Управление доступом в фаерволе${NC} ($(get_snell_fw_status))"
         echo -e "  ${YELLOW}[0]${NC} ⬅️  Назад в Главное Меню"
         echo ""
-        read -p "Выберите пункт [0-9]: " s_choice
+        read -p "Выберите пункт [0-10]: " s_choice
         case "$s_choice" in
             1)
                 show_snell_header
@@ -1088,6 +1410,7 @@ menu_snell() {
             7) snell_export_links ;;
             8) journalctl -u snell -f -n 50 ;;
             9) restart_snell_and_verify; sleep 2 ;;
+            10) toggle_snell_fw ;;
             0) return ;;
             *) echo "Неверный выбор"; sleep 1 ;;
         esac
@@ -1106,7 +1429,7 @@ show_wdtt_header() {
     echo -e "${CYAN}╠══════════════════════════════════════════════════════════════════════╣${NC}"
     echo -e "${CYAN}║${NC}  Сервер:   ${BOLD}${SERVER_IP}${NC}  |  Служба: $(get_wdtt_status)"
     echo -e "${CYAN}║${NC}  Порты:    ${BOLD}:${peer_p}/UDP (VPN) | 56002 (Direct) | 56003 (Raw) | 56001 (WG)${NC}"
-    echo -e "${CYAN}║${NC}  Профиль:  ${BOLD}${prof_name}${NC}"
+    echo -e "${CYAN}║${NC}  Фаервол:  $(get_wdtt_fw_status)  |  Профиль: ${BOLD}${prof_name}${NC}"
     echo -e "${CYAN}║${NC}  Маршрут:  $(get_wdtt_routing)  |  Пароль: ${GREEN}$(get_wdtt_password)${NC}"
     echo -e "${CYAN}╚══════════════════════════════════════════════════════════════════════╝${NC}"
     echo ""
@@ -1225,9 +1548,10 @@ menu_wdtt() {
         echo -e "  ${YELLOW}[5]${NC} ✏️  ${BOLD}Изменить название подключения (name)${NC}"
         echo -e "  ${YELLOW}[6]${NC} 📜 Живые логи службы WDTT (journalctl)"
         echo -e "  ${YELLOW}[7]${NC} 🔄 Перезапустить службу wdtt"
+        echo -e "  ${YELLOW}[8]${NC} 🔒 ${BOLD}Управление доступом в фаерволе${NC} ($(get_wdtt_fw_status))"
         echo -e "  ${YELLOW}[0]${NC} ⬅️  Назад в Главное Меню"
         echo ""
-        read -p "Выберите пункт [0-7]: " w_choice
+        read -p "Выберите пункт [0-8]: " w_choice
         case "$w_choice" in
             1)
                 show_wdtt_header
@@ -1243,6 +1567,7 @@ menu_wdtt() {
             5) wdtt_change_profile_name ;;
             6) journalctl -u wdtt -f -n 50 ;;
             7) restart_wdtt_and_verify; sleep 2 ;;
+            8) toggle_wdtt_fw ;;
             0) return ;;
             *) echo "Неверный выбор"; sleep 1 ;;
         esac
@@ -1533,10 +1858,10 @@ show_csqtt_header() {
     echo -e "${CYAN}╔══════════════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${CYAN}║${BOLD}          УПРАВЛЕНИЕ СЛУЖБОЙ CSQTT И ЗАЩИТОЙ ВЕБ-ПАНЕЛИ             ${CYAN}║${NC}"
     echo -e "${CYAN}╠══════════════════════════════════════════════════════════════════════╣${NC}"
-    echo -e "${CYAN}║${NC}  Сервер: ${BOLD}${SERVER_IP}${NC}  |  Статус: $(get_csqtt_status)"
-    echo -e "${CYAN}║${NC}  VPN порт: ${BOLD}${peer_p}/UDP${NC}  |  Пароль туннеля: ${GREEN}${tp}${NC}"
-    echo -e "${CYAN}║${NC}  Веб-панель: ${BOLD}${port}/TCP${NC}  |  Защита: $(get_csqtt_protect_status)"
-    echo -e "${CYAN}║${NC}  Вход в панель: Логин: ${GREEN}${u}${NC}  |  Пароль: ${GREEN}${p}${NC}"
+    echo -e "${CYAN}║${NC}  Сервер:     ${BOLD}${SERVER_IP}${NC}  |  Статус: $(get_csqtt_status)"
+    echo -e "${CYAN}║${NC}  VPN туннель: :${peer_p}/UDP  |  Фаервол: $(get_csqtt_tunnel_status)"
+    echo -e "${CYAN}║${NC}  Веб-панель:  :${port}/TCP    |  Защита: $(get_csqtt_protect_status)"
+    echo -e "${CYAN}║${NC}  Вход в панель: Логин: ${GREEN}${u}${NC}  |  Пароль: ${GREEN}${p}${NC}  |  Пароль VPN: ${GREEN}${tp}${NC}"
     echo -e "${CYAN}╚══════════════════════════════════════════════════════════════════════╝${NC}"
     echo ""
 }
@@ -1561,14 +1886,15 @@ menu_csqtt() {
         show_csqtt_header
         echo -e "  ${YELLOW}[1]${NC} 📊 Статус службы csqtt и активные сокеты"
         echo -e "  ${YELLOW}[2]${NC} 🔒 ${BOLD}Включить защиту веб-панели${NC} (Доступ ТОЛЬКО через SSH-туннель)"
-        echo -e "  ${YELLOW}[3]${NC} 🔓 ${BOLD}Открыть прямой доступ из интернета${NC} (Доступ без туннеля)"
-        echo -e "  ${YELLOW}[4]${NC} 🔑 ${BOLD}Команда SSH-туннеля и инструкция для ПК${NC}"
-        echo -e "  ${YELLOW}[5]${NC} 📋 ${BOLD}Показать все реквизиты CSQTT${NC} (Логин, пароль панели и пароль туннеля)"
-        echo -e "  ${YELLOW}[6]${NC} 📜 Живые логи службы csqtt (journalctl)"
-        echo -e "  ${YELLOW}[7]${NC} 🔄 Перезапустить службу csqtt"
+        echo -e "  ${YELLOW}[3]${NC} 🔓 ${BOLD}Открыть прямой доступ к веб-панели из интернета${NC}"
+        echo -e "  ${YELLOW}[4]${NC} 🛡️  ${BOLD}Включить / Выключить VPN-туннель в фаерволе${NC} ($(get_csqtt_tunnel_status))"
+        echo -e "  ${YELLOW}[5]${NC} 🔑 ${BOLD}Команда SSH-туннеля и инструкция для ПК${NC}"
+        echo -e "  ${YELLOW}[6]${NC} 📋 ${BOLD}Показать все реквизиты CSQTT${NC} (Логин, пароль панели и пароль туннеля)"
+        echo -e "  ${YELLOW}[7]${NC} 📜 Живые логи службы csqtt (journalctl)"
+        echo -e "  ${YELLOW}[8]${NC} 🔄 Перезапустить службу csqtt"
         echo -e "  ${YELLOW}[0]${NC} ⬅️  Назад в Главное Меню"
         echo ""
-        read -p "Выберите пункт [0-7]: " c_choice
+        read -p "Выберите пункт [0-8]: " c_choice
         case "$c_choice" in
             1)
                 show_csqtt_header
@@ -1588,15 +1914,18 @@ menu_csqtt() {
                 sleep 2
                 ;;
             4)
-                show_csqtt_tunnel_card
+                toggle_csqtt_tunnel_fw
                 ;;
             5)
-                show_csqtt_credentials
+                show_csqtt_tunnel_card
                 ;;
             6)
-                journalctl -u csqtt -f -n 50
+                show_csqtt_credentials
                 ;;
             7)
+                journalctl -u csqtt -f -n 50
+                ;;
+            8)
                 echo -e "${YELLOW}Перезапуск службы csqtt...${NC}"
                 systemctl restart csqtt
                 sleep 2
@@ -1604,6 +1933,7 @@ menu_csqtt() {
                 sleep 1
                 ;;
             0) return ;;
+            *) echo "Неверный выбор"; sleep 1 ;;
         esac
     done
 }
@@ -2637,6 +2967,10 @@ rescan_and_adopt_protocols() {
         echo -e "  ${RED}[✗] CSQTT${NC}:              Не установлен"
     fi
 
+    # Firewall aliases
+    [ ! -L "/usr/local/bin/x-fw" ] && ln -sf /usr/local/bin/x-manager /usr/local/bin/x-fw 2>/dev/null || true
+    [ ! -L "/usr/local/bin/x-firewall" ] && ln -sf /usr/local/bin/x-manager /usr/local/bin/x-firewall 2>/dev/null || true
+
     # MasterDnsVPN adoption if binary is in /opt/masterdnsvpn
     if [ ! -f "$MASTERDNS_BIN" ] && [ -d "/opt/masterdnsvpn" ]; then
         local found_m=$(find /opt/masterdnsvpn -maxdepth 1 -type f -name "MasterDnsVPN_Server_Linux_*" 2>/dev/null | head -n 1)
@@ -2772,6 +3106,9 @@ main_hub() {
     elif [ "$invoked" = "x-dns" ] || [ "$invoked" = "x-cottendns" ] || [ "$invoked" = "x-masterdns" ]; then
         menu_dns
         exit 0
+    elif [ "$invoked" = "x-fw" ] || [ "$invoked" = "x-firewall" ]; then
+        menu_firewall
+        exit 0
     fi
 
     while true; do
@@ -2783,24 +3120,24 @@ main_hub() {
         echo -e "${CYAN}║${NC}"
         if is_mieru_installed; then
             echo -e "${CYAN}║${NC}  ${BOLD}[1] 🚀 Mieru (mita v3.37.0)${NC}   -> $(get_mieru_status)"
-            echo -e "${CYAN}║${NC}      Порты: ${BOLD}$(get_mieru_ports)${NC}  |  Профиль: $(get_mieru_preset)"
-            echo -e "${CYAN}║${NC}      Маршрут: $(get_mieru_routing)"
+            echo -e "${CYAN}║${NC}      Порты: ${BOLD}$(get_mieru_ports)${NC}  |  Фаервол: $(get_mieru_fw_status)"
+            echo -e "${CYAN}║${NC}      Маршрут: $(get_mieru_routing)  |  Профиль: $(get_mieru_preset)"
         else
             echo -e "${CYAN}║${NC}  ${BOLD}[1] 🚀 Mieru (mita)${NC}           -> ${RED}НЕ УСТАНОВЛЕН${NC}"
         fi
         echo -e "${CYAN}║${NC}"
         if is_snell_installed; then
             echo -e "${CYAN}║${NC}  ${BOLD}[2] ⚡ Snell (v5.0.1)${NC}         -> $(get_snell_status)"
-            echo -e "${CYAN}║${NC}      Порт:  ${BOLD}$(get_snell_port)${NC} (TCP+UDP QUIC) |  Обфускация: $(get_snell_obfs)"
-            echo -e "${CYAN}║${NC}      Маршрут: $(get_snell_routing)"
+            echo -e "${CYAN}║${NC}      Порт:  ${BOLD}$(get_snell_port)${NC} (TCP+UDP QUIC) |  Фаервол: $(get_snell_fw_status)"
+            echo -e "${CYAN}║${NC}      Маршрут: $(get_snell_routing)  |  Обфускация: $(get_snell_obfs)"
         else
             echo -e "${CYAN}║${NC}  ${BOLD}[2] ⚡ Snell (v5.0.1)${NC}         -> ${RED}НЕ УСТАНОВЛЕН${NC}"
         fi
         echo -e "${CYAN}║${NC}"
         if is_wdtt_installed; then
             echo -e "${CYAN}║${NC}  ${BOLD}[3] 🛡️ WDTT / qwdtt${NC}          -> $(get_wdtt_status)"
-            echo -e "${CYAN}║${NC}      Порт:   :${BOLD}$(get_wdtt_peer_port)/UDP${NC}   |  Пароль: ${GREEN}$(get_wdtt_password)${NC}"
-            echo -e "${CYAN}║${NC}      Профиль: ${BOLD}$(get_wdtt_profile_name)${NC}"
+            echo -e "${CYAN}║${NC}      Порт:   :${BOLD}$(get_wdtt_peer_port)/UDP${NC}   |  Фаервол: $(get_wdtt_fw_status)"
+            echo -e "${CYAN}║${NC}      Профиль: ${BOLD}$(get_wdtt_profile_name)${NC}  |  Пароль: ${GREEN}$(get_wdtt_password)${NC}"
             echo -e "${CYAN}║${NC}      Маршрут: $(get_wdtt_routing)"
         else
             echo -e "${CYAN}║${NC}  ${BOLD}[3] 🛡️ WDTT / qwdtt${NC}          -> ${RED}НЕ УСТАНОВЛЕН${NC}"
@@ -2808,8 +3145,8 @@ main_hub() {
         echo -e "${CYAN}║${NC}"
         if is_csqtt_installed; then
             echo -e "${CYAN}║${NC}  ${BOLD}[4] 🔒 CSQTT (VPN & Web-панель)${NC}-> $(get_csqtt_status)"
+            echo -e "${CYAN}║${NC}      VPN порт:   :${BOLD}$(get_csqtt_peer_port)/UDP${NC}   |  Фаервол: $(get_csqtt_tunnel_status)"
             echo -e "${CYAN}║${NC}      Веб-панель: :${BOLD}$(get_csqtt_web_port)/TCP${NC}   |  Защита: $(get_csqtt_protect_status)"
-            echo -e "${CYAN}║${NC}      VPN порт:   :${BOLD}$(get_csqtt_peer_port)/UDP${NC}   |  Пароль: ${GREEN}$(get_csqtt_tunnel_pass)${NC}"
             echo -e "${CYAN}║${NC}      Веб-вход:   Логин: ${GREEN}$(get_csqtt_user)${NC}  |  Пароль: ${GREEN}$(get_csqtt_pass)${NC}"
         else
             echo -e "${CYAN}║${NC}  ${BOLD}[4] 🔒 CSQTT (VPN & Web-панель)${NC}-> ${RED}НЕ УСТАНОВЛЕН${NC}"
@@ -2817,34 +3154,36 @@ main_hub() {
         echo -e "${CYAN}║${NC}"
         if is_dns_installed; then
             echo -e "${CYAN}║${NC}  ${BOLD}[5] 🌐 DNS-Туннель (MasterDnsVPN)${NC}  -> $(get_dns_status)"
-            echo -e "${CYAN}║${NC}      Домен: ${BOLD}$(get_dns_domain)${NC} (:53 UDP/TCP) | WAN: $(get_dns_wan_status)"
+            echo -e "${CYAN}║${NC}      Домен: ${BOLD}$(get_dns_domain)${NC} (:53 UDP/TCP) | Фаервол WAN: $(get_dns_wan_status)"
             echo -e "${CYAN}║${NC}      Маршрут: $(get_dns_routing)"
         else
             echo -e "${CYAN}║${NC}  ${BOLD}[5] 🌐 DNS-Туннель (MasterDnsVPN)${NC}  -> ${RED}НЕ УСТАНОВЛЕН${NC}"
         fi
         echo -e "${CYAN}╚══════════════════════════════════════════════════════════════════════╝${NC}"
         echo ""
-        echo -e "  ${GREEN}${BOLD}[1]${NC} 🚀 ${BOLD}Управление Mieru${NC} (Anti-TSPU, Egress, пользователи, порты)"
-        echo -e "  ${BLUE}${BOLD}[2]${NC} ⚡ ${BOLD}Управление Snell v5${NC} (0-RTT, Egress Xray/Direct, HTTP-obfs, PSK)"
-        echo -e "  ${PURPLE}${BOLD}[3]${NC} 🛡️  ${BOLD}Управление WDTT / qwdtt${NC} (Egress в ядро / Прямой выход, клиенты)"
-        echo -e "  ${CYAN}${BOLD}[4]${NC} 🔒 ${BOLD}Управление CSQTT${NC} (Защита веб-панели, SSH-туннель, логин/пароли)"
+        echo -e "  ${GREEN}${BOLD}[1]${NC} 🚀 ${BOLD}Управление Mieru${NC} (Anti-TSPU, Egress, пользователи, порты, фаервол)"
+        echo -e "  ${BLUE}${BOLD}[2]${NC} ⚡ ${BOLD}Управление Snell v5${NC} (0-RTT, Egress Xray/Direct, HTTP-obfs, фаервол)"
+        echo -e "  ${PURPLE}${BOLD}[3]${NC} 🛡️  ${BOLD}Управление WDTT / qwdtt${NC} (Egress в ядро / Прямой выход, клиенты, фаервол)"
+        echo -e "  ${CYAN}${BOLD}[4]${NC} 🔒 ${BOLD}Управление CSQTT${NC} (Защита веб-панели, туннель фаервол, логин/пароли)"
         echo -e "  ${YELLOW}${BOLD}[5]${NC} 🌐 ${BOLD}Управление DNS-туннелями${NC} (MasterDnsVPN / CottenDNS, stormdns://, WAN)"
         echo ""
-        echo -e "  ${BOLD}[6]${NC} 📊 Сводный статус всех служб и портов сервера"
-        echo -e "  ${BOLD}[7]${NC} 🔄 Перезапустить все сервисы (Mieru + Snell + WDTT + CSQTT + DNS)"
-        echo -e "  ${BOLD}[8]${NC} 🔍 ${BOLD}Пересканировать и подхватить протоколы${NC} (Автоопределение установленных служб)"
+        echo -e "  ${RED}${BOLD}[6]${NC} 🛡️  ${BOLD}Центр управления фаерволом портов${NC} (Включение/Выключение протоколов, Локдаун)"
+        echo -e "  ${BOLD}[7]${NC} 📊 Сводный статус всех служб и портов сервера"
+        echo -e "  ${BOLD}[8]${NC} 🔄 Перезапустить все сервисы (Mieru + Snell + WDTT + CSQTT + DNS)"
+        echo -e "  ${BOLD}[9]${NC} 🔍 ${BOLD}Пересканировать и подхватить протоколы${NC} (Автоопределение установленных служб)"
         echo -e "  ${BOLD}[0]${NC} 🚪 Выход"
         echo ""
-        read -p "Выберите раздел [0-8]: " top_choice
+        read -p "Выберите раздел [0-9]: " top_choice
         case "$top_choice" in
             1) menu_mieru ;;
             2) menu_snell ;;
             3) menu_wdtt ;;
             4) menu_csqtt ;;
             5) menu_dns ;;
-            6) view_global_status ;;
-            7) restart_all_services ;;
-            8) rescan_and_adopt_protocols ;;
+            6) menu_firewall ;;
+            7) view_global_status ;;
+            8) restart_all_services ;;
+            9) rescan_and_adopt_protocols ;;
             0) clear; exit 0 ;;
             *) echo "Неверный выбор"; sleep 1 ;;
         esac
