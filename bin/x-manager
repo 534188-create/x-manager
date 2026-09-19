@@ -9,6 +9,7 @@
 # ==============================================================================
 
 set -e
+clear() { command clear 2>/dev/null || true; }
 
 # Цвета терминала
 RED='\033[0;31m'
@@ -2403,7 +2404,7 @@ rescan_and_adopt_protocols() {
     if is_snell_installed; then
         [ ! -L "/usr/local/bin/x-snell" ] && ln -sf /usr/local/bin/x-manager /usr/local/bin/x-snell 2>/dev/null || true
         echo -e "  ${GREEN}[✓] Snell v5${NC}:           Обнаружен! $(get_snell_status) | Порт: $(get_snell_port)"
-        ((count++))
+        count=$((count + 1))
     else
         echo -e "  ${RED}[✗] Snell v5${NC}:           Не установлен"
     fi
@@ -2412,7 +2413,7 @@ rescan_and_adopt_protocols() {
     if is_mieru_installed; then
         [ ! -L "/usr/local/bin/x-mieru" ] && ln -sf /usr/local/bin/x-manager /usr/local/bin/x-mieru 2>/dev/null || true
         echo -e "  ${GREEN}[✓] Mieru (mita)${NC}:       Обнаружен! $(get_mieru_status) | Порты: $(get_mieru_ports)"
-        ((count++))
+        count=$((count + 1))
     else
         echo -e "  ${RED}[✗] Mieru (mita)${NC}:       Не установлен"
     fi
@@ -2422,7 +2423,7 @@ rescan_and_adopt_protocols() {
         [ ! -L "/usr/local/bin/x-wdtt" ] && ln -sf /usr/local/bin/x-manager /usr/local/bin/x-wdtt 2>/dev/null || true
         [ ! -L "/usr/local/bin/x-qwdtt" ] && ln -sf /usr/local/bin/x-manager /usr/local/bin/x-qwdtt 2>/dev/null || true
         echo -e "  ${GREEN}[✓] WDTT / qwdtt${NC}:       Обнаружен! $(get_wdtt_status) | Порты: 56000-56003"
-        ((count++))
+        count=$((count + 1))
     else
         echo -e "  ${RED}[✗] WDTT / qwdtt${NC}:       Не установлен"
     fi
@@ -2431,7 +2432,7 @@ rescan_and_adopt_protocols() {
     if is_csqtt_installed; then
         [ ! -L "/usr/local/bin/x-csqtt" ] && ln -sf /usr/local/bin/x-manager /usr/local/bin/x-csqtt 2>/dev/null || true
         echo -e "  ${GREEN}[✓] CSQTT${NC}:              Обнаружен! $(get_csqtt_status) | Панель: :$(get_csqtt_web_port)"
-        ((count++))
+        count=$((count + 1))
     else
         echo -e "  ${RED}[✗] CSQTT${NC}:              Не установлен"
     fi
@@ -2452,8 +2453,10 @@ rescan_and_adopt_protocols() {
     if is_cottendns_installed; then
         [ ! -L "/usr/local/bin/x-dns" ] && ln -sf /usr/local/bin/x-manager /usr/local/bin/x-dns 2>/dev/null || true
         [ ! -L "/usr/local/bin/x-cottendns" ] && ln -sf /usr/local/bin/x-manager /usr/local/bin/x-cottendns 2>/dev/null || true
-        echo -e "  ${GREEN}[✓] CottenDNS${NC}:          Обнаружен! $(systemctl is-active cottendns 2>/dev/null || echo 'остановлен')"
-        ((count++))
+        local c_st="ОСТАНОВЛЕН"
+        systemctl is-active --quiet cottendns 2>/dev/null && c_st="АКТИВЕН"
+        echo -e "  ${GREEN}[✓] CottenDNS${NC}:          Обнаружен! ${c_st}"
+        count=$((count + 1))
     else
         echo -e "  ${RED}[✗] CottenDNS${NC}:          Не установлен"
     fi
@@ -2462,8 +2465,10 @@ rescan_and_adopt_protocols() {
     if is_masterdns_installed; then
         [ ! -L "/usr/local/bin/x-dns" ] && ln -sf /usr/local/bin/x-manager /usr/local/bin/x-dns 2>/dev/null || true
         [ ! -L "/usr/local/bin/x-masterdns" ] && ln -sf /usr/local/bin/x-manager /usr/local/bin/x-masterdns 2>/dev/null || true
-        echo -e "  ${GREEN}[✓] MasterDnsVPN${NC}:       Обнаружен! $(systemctl is-active masterdns 2>/dev/null || echo 'остановлен')"
-        ((count++))
+        local m_st="ОСТАНОВЛЕН (В РЕЗЕРВЕ)"
+        systemctl is-active --quiet masterdns 2>/dev/null && m_st="АКТИВЕН"
+        echo -e "  ${GREEN}[✓] MasterDnsVPN${NC}:       Обнаружен! ${m_st}"
+        count=$((count + 1))
     else
         echo -e "  ${RED}[✗] MasterDnsVPN${NC}:       Не установлен"
     fi
