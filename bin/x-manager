@@ -1635,6 +1635,9 @@ get_stormdns_link() {
     local p_domain="$2"
     local p_key="$3"
     local p_name="$4"
+    [ -z "$p_domain" ] && p_domain=$(get_dns_domain)
+    [ -z "$p_key" ] && p_key=$(get_dns_key)
+    [ -z "$p_name" ] && p_name="FP dns tunnel"
     python3 - << PYEOF
 import json, base64
 
