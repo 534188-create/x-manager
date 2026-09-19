@@ -3082,6 +3082,12 @@ view_global_status() {
     fi
     printf "  %-22s %s\n" "Xray Core (3X-UI):" "$(systemctl is-active x-ui 2>/dev/null || echo 'inactive')"
     echo ""
+    echo -e "${BOLD}--- Системные оптимизации и безопасность ---${NC}"
+    printf "  %-22s %-25b\n" "Системный DNS:" "$(get_sys_dns_short)"
+    printf "  %-22s %-25b\n" "TCP BBR & Очередь:" "$(get_bbr_short_status)"
+    printf "  %-22s %-25b\n" "Файл подкачки (Swap):" "$(get_swap_short_status)"
+    printf "  %-22s %-25b\n" "Fail2ban (Защита SSH):" "$(get_f2b_short_status)"
+    echo ""
     echo -e "${BOLD}--- Внутренние шлюзы ядра Xray (Вход для прокси-служб) ---${NC}"
     echo -e "  • ${CYAN}TPROXY (прозрачный шлюз):${NC} 127.0.0.1:12345 (TCP/UDP) ${GREEN}[Локально / Извне ЗАКРЫТ 🔒]${NC}"
     echo -e "  • ${CYAN}SOCKS5 вход ядра:${NC}         127.0.0.1:10808 (TCP)     ${GREEN}[Локально / Извне ЗАКРЫТ 🔒]${NC}"
@@ -3124,6 +3130,979 @@ restart_all_services() {
     sleep 2
 }
 
+
+# ==============================================================================
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ: СИСТЕМНЫЙ СТАТУС (DNS, BBR, SWAP, FAIL2BAN)
+# ==============================================================================
+get_sys_dns_short() {
+    local dns_list=$(grep -E "^nameserver" /etc/resolv.conf 2>/dev/null | awk '{print $2}' | tr '\n' ' ' | sed 's/ $//')
+    [ -z "$dns_list" ] && dns_list="Не определен"
+    echo "$dns_list"
+}
+
+get_bbr_short_status() {
+    local cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "unknown")
+    local qd=$(sysctl -n net.core.default_qdisc 2>/dev/null || echo "unknown")
+    if [ "$cc" = "bbr" ]; then
+        echo -e "${GREEN}BBR (${qd}+${cc})${NC}"
+    else
+        echo -e "${YELLOW}${cc} (Не оптим.)${NC}"
+    fi
+}
+
+get_swap_short_status() {
+    local sw_total=$(free -m 2>/dev/null | awk '/^Swap:/{print $2}')
+    if [ -n "$sw_total" ] && [ "$sw_total" -gt 0 ]; then
+        local sw_h=$(free -h 2>/dev/null | awk '/^Swap:/{print $2}')
+        local sw_u=$(free -h 2>/dev/null | awk '/^Swap:/{print $3}')
+        echo -e "${GREEN}${sw_h}${NC} (занято ${sw_u})"
+    else
+        echo -e "${YELLOW}НЕТ SWAP${NC}"
+    fi
+}
+
+get_f2b_short_status() {
+    if ! which fail2ban-client >/dev/null 2>&1; then
+        echo -e "${RED}НЕ УСТАНОВЛЕН${NC}"
+    elif systemctl is-active --quiet fail2ban; then
+        local j_cnt=$(fail2ban-client status 2>/dev/null | grep -E "Number of jail:" | awk '{print $NF}')
+        [ -z "$j_cnt" ] && j_cnt="0"
+        echo -e "${GREEN}АКТИВЕН (${j_cnt} jails)${NC}"
+    else
+        echo -e "${YELLOW}ОСТАНОВЛЕН${NC}"
+    fi
+}
+
+# ------------------------------------------------------------------------------
+# СИСТЕМНЫЙ DNS: ПАРАЛЛЕЛЬНЫЙ ПИНГ И ПРИМЕНЕНИЕ
+# ------------------------------------------------------------------------------
+ping_dns_target() {
+    local ip="$1"
+    local outfile="$2"
+    local rtt=$(ping -c 2 -i 0.2 -W 1 "$ip" 2>/dev/null | awk -F'/' '/avg|rtt/{printf "%.1f ms", $5}')
+    if [ -n "$rtt" ]; then
+        echo "$rtt" > "$outfile"
+    else
+        if nc -z -u -w 1 "$ip" 53 2>/dev/null || (timeout 1 bash -c "echo >/dev/tcp/$ip/53") 2>/dev/null; then
+            echo "Port 53 OK" > "$outfile"
+        else
+            echo "Таймаут" > "$outfile"
+        fi
+    fi
+}
+
+format_dns_ping() {
+    local ping_val="$1"
+    if [[ "$ping_val" =~ "Таймаут" ]]; then
+        echo -e "${RED}[ Таймаут ]${NC}"
+    elif [[ "$ping_val" =~ "Port 53" ]]; then
+        echo -e "${CYAN}[ Порт 53 OK ]${NC}"
+    elif [ -n "$ping_val" ]; then
+        local ms_num=$(echo "$ping_val" | awk '{print int($1)}')
+        if [ "$ms_num" -lt 15 ]; then
+            echo -e "${GREEN}[ ${ping_val} ]${NC}"
+        elif [ "$ms_num" -lt 50 ]; then
+            echo -e "${CYAN}[ ${ping_val} ]${NC}"
+        elif [ "$ms_num" -lt 100 ]; then
+            echo -e "${YELLOW}[ ${ping_val} ]${NC}"
+        else
+            echo -e "${PURPLE}[ ${ping_val} ]${NC}"
+        fi
+    else
+        echo -e "${YELLOW}[ Замер... ]${NC}"
+    fi
+}
+
+apply_system_dns() {
+    local p_dns="$1"
+    local s_dns="$2"
+    local desc="$3"
+
+    clear
+    echo -e "${BOLD}--- Применение системного DNS ---${NC}"
+    echo -e "Выбран DNS: ${GREEN}${desc}${NC}"
+    echo -e "  • Основной (Primary):   ${CYAN}${p_dns}${NC}"
+    [ -n "$s_dns" ] && echo -e "  • Резервный (Secondary): ${CYAN}${s_dns}${NC}"
+    echo ""
+
+    chattr -i /etc/resolv.conf 2>/dev/null || true
+
+    if [ ! -f /etc/resolv.conf.x-bak ]; then
+        cp /etc/resolv.conf /etc/resolv.conf.x-bak 2>/dev/null || true
+    fi
+
+    # 1. systemd-resolved
+    if systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+        mkdir -p /etc/systemd/resolved.conf.d
+        cat > /etc/systemd/resolved.conf.d/99-xmanager-dns.conf <<EOF
+[Resolve]
+DNS=${p_dns} ${s_dns}
+FallbackDNS=1.1.1.1 8.8.8.8
+Domains=~.
+DNSSEC=allow-downgrade
+DNSOverTLS=no
+EOF
+        systemctl restart systemd-resolved 2>/dev/null || true
+        local def_if=$(ip route show default 2>/dev/null | awk '{print $5}' | head -n1)
+        if [ -n "$def_if" ] && which resolvectl >/dev/null 2>&1; then
+            resolvectl dns "$def_if" $p_dns $s_dns 2>/dev/null || true
+            resolvectl default-route "$def_if" true 2>/dev/null || true
+        fi
+    fi
+
+    # 2. Прямая запись в /etc/resolv.conf
+    [ -L /etc/resolv.conf ] && rm -f /etc/resolv.conf
+    cat > /etc/resolv.conf <<EOF
+# Generated by x-manager system optimizer
+nameserver ${p_dns}
+EOF
+    [ -n "$s_dns" ] && echo "nameserver ${s_dns}" >> /etc/resolv.conf
+    cat >> /etc/resolv.conf <<EOF
+options timeout:2 attempts:2
+EOF
+
+    # 3. Фиксация в dhclient.conf
+    if [ -d /etc/dhcp ]; then
+        local dh_conf="/etc/dhcp/dhclient.conf"
+        [ -f "$dh_conf" ] && sed -i '/supersede domain-name-servers/d' "$dh_conf"
+        if [ -n "$s_dns" ]; then
+            echo "supersede domain-name-servers ${p_dns}, ${s_dns};" >> "$dh_conf" 2>/dev/null || true
+        else
+            echo "supersede domain-name-servers ${p_dns};" >> "$dh_conf" 2>/dev/null || true
+        fi
+    fi
+
+    mkdir -p /etc/x-manager 2>/dev/null || true
+    echo "${desc}|${p_dns}|${s_dns}" > /etc/x-manager/dns_profile.txt
+
+    sleep 1
+    echo -e "${YELLOW}Тестирование разрешения доменных имён...${NC}"
+    local ya_ip=$(getent ahostsv4 ya.ru 2>/dev/null | awk '{print $1}' | head -n1)
+    local goog_ip=$(getent ahostsv4 google.com 2>/dev/null | awk '{print $1}' | head -n1)
+
+    if [ -n "$ya_ip" ] || [ -n "$goog_ip" ]; then
+        echo -e "${GREEN}✓ Системный DNS успешно применён и работает!${NC}"
+        [ -n "$ya_ip" ] && echo -e "  • ya.ru       -> ${GREEN}${ya_ip}${NC}"
+        [ -n "$goog_ip" ] && echo -e "  • google.com  -> ${GREEN}${goog_ip}${NC}"
+    else
+        echo -e "${RED}⚠️ Внимание: доменные имена не разрешаются через выбранный DNS!${NC}"
+        echo -e "${YELLOW}Возможно, провайдер или фаервол блокирует порт 53 UDP.${NC}"
+    fi
+    echo ""
+    read -p "Нажмите Enter для продолжения..."
+}
+
+menu_dns_russian() {
+    clear
+    echo -e "${BOLD}--- Выбор системного DNS (Серверы в России) ---${NC}"
+    echo -e "${YELLOW}⏳ Замер задержки (пинг) до российских DNS-серверов...${NC}"
+
+    local tmpdir=$(mktemp -d /tmp/x_dns_ping.XXXXXX)
+    ping_dns_target "77.88.8.8" "$tmpdir/p1" &
+    ping_dns_target "77.88.8.88" "$tmpdir/p2" &
+    ping_dns_target "77.88.8.7" "$tmpdir/p3" &
+    ping_dns_target "193.58.251.251" "$tmpdir/p4" &
+    ping_dns_target "83.220.169.155" "$tmpdir/p5" &
+    ping_dns_target "195.34.32.116" "$tmpdir/p6" &
+    wait
+
+    local p1=$(cat "$tmpdir/p1" 2>/dev/null)
+    local p2=$(cat "$tmpdir/p2" 2>/dev/null)
+    local p3=$(cat "$tmpdir/p3" 2>/dev/null)
+    local p4=$(cat "$tmpdir/p4" 2>/dev/null)
+    local p5=$(cat "$tmpdir/p5" 2>/dev/null)
+    local p6=$(cat "$tmpdir/p6" 2>/dev/null)
+    rm -rf "$tmpdir"
+
+    clear
+    echo -e "${CYAN}╔══════════════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${CYAN}║${BOLD}             РОССИЙСКИЕ СИСТЕМНЫЕ DNS-СЕРВЕРЫ (IPv4 :53)              ${CYAN}║${NC}"
+    echo -e "${CYAN}╠══════════════════════════════════════════════════════════════════════╣${NC}"
+    echo -e "${CYAN}║${NC}  Текущие DNS: ${GREEN}$(get_sys_dns_short)${NC}"
+    echo -e "${CYAN}╚══════════════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    printf "  ${YELLOW}[1]${NC} %-19s %-32s %-18b %s\n" "Yandex DNS" "77.88.8.8 / 77.88.8.1" "$(format_dns_ping "$p1")" "(Обычный, быстрый Anycast)"
+    printf "  ${YELLOW}[2]${NC} %-19s %-32s %-18b %s\n" "Yandex DNS Safe" "77.88.8.88 / 77.88.8.2" "$(format_dns_ping "$p2")" "(Фильтрация опасных сайтов)"
+    printf "  ${YELLOW}[3]${NC} %-19s %-32s %-18b %s\n" "Yandex Family" "77.88.8.7 / 77.88.8.3" "$(format_dns_ping "$p3")" "(Семейная фильтрация)"
+    printf "  ${YELLOW}[4]${NC} %-19s %-32s %-18b %s\n" "SkyDNS" "193.58.251.251" "$(format_dns_ping "$p4")" "(Российский DNS, фильтрация)"
+    printf "  ${YELLOW}[5]${NC} %-19s %-32s %-18b %s\n" "Comss.one DNS" "83.220.169.155 / 212.109.195.93" "$(format_dns_ping "$p5")" "(Узел в Москве + резерв)"
+    printf "  ${YELLOW}[6]${NC} %-19s %-32s %-18b %s\n" "MTS DNS" "195.34.32.116 / 212.188.4.10" "$(format_dns_ping "$p6")" "(Операторский DNS МТС)"
+    echo ""
+    echo -e "  ${YELLOW}[0]${NC} Назад"
+    echo ""
+    read -p "Выберите DNS-сервер [0-6]: " ru_choice
+    case "$ru_choice" in
+        1) apply_system_dns "77.88.8.8" "77.88.8.1" "Yandex DNS" ;;
+        2) apply_system_dns "77.88.8.88" "77.88.8.2" "Yandex DNS Safe" ;;
+        3) apply_system_dns "77.88.8.7" "77.88.8.3" "Yandex Family" ;;
+        4) apply_system_dns "193.58.251.251" "193.58.251.252" "SkyDNS" ;;
+        5) apply_system_dns "83.220.169.155" "212.109.195.93" "Comss.one DNS" ;;
+        6) apply_system_dns "195.34.32.116" "212.188.4.10" "MTS DNS" ;;
+        0) return ;;
+        *) echo "Неверный выбор"; sleep 1 ;;
+    esac
+}
+
+menu_dns_foreign() {
+    clear
+    echo -e "${BOLD}--- Выбор системного DNS (Зарубежные серверы) ---${NC}"
+    echo -e "${YELLOW}⏳ Замер задержки (пинг) до зарубежных DNS-серверов...${NC}"
+
+    local tmpdir=$(mktemp -d /tmp/x_dns_ping.XXXXXX)
+    ping_dns_target "1.1.1.1" "$tmpdir/p1" &
+    ping_dns_target "8.8.8.8" "$tmpdir/p2" &
+    ping_dns_target "9.9.9.9" "$tmpdir/p3" &
+    ping_dns_target "76.76.2.0" "$tmpdir/p4" &
+    ping_dns_target "94.140.14.140" "$tmpdir/p5" &
+    ping_dns_target "208.67.222.222" "$tmpdir/p6" &
+    ping_dns_target "8.26.56.26" "$tmpdir/p7" &
+    ping_dns_target "185.228.168.9" "$tmpdir/p8" &
+    ping_dns_target "195.46.39.39" "$tmpdir/p9" &
+    ping_dns_target "64.6.64.6" "$tmpdir/p10" &
+    wait
+
+    local p1=$(cat "$tmpdir/p1" 2>/dev/null)
+    local p2=$(cat "$tmpdir/p2" 2>/dev/null)
+    local p3=$(cat "$tmpdir/p3" 2>/dev/null)
+    local p4=$(cat "$tmpdir/p4" 2>/dev/null)
+    local p5=$(cat "$tmpdir/p5" 2>/dev/null)
+    local p6=$(cat "$tmpdir/p6" 2>/dev/null)
+    local p7=$(cat "$tmpdir/p7" 2>/dev/null)
+    local p8=$(cat "$tmpdir/p8" 2>/dev/null)
+    local p9=$(cat "$tmpdir/p9" 2>/dev/null)
+    local p10=$(cat "$tmpdir/p10" 2>/dev/null)
+    rm -rf "$tmpdir"
+
+    clear
+    echo -e "${CYAN}╔══════════════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${CYAN}║${BOLD}             ЗАРУБЕЖНЫЕ СИСТЕМНЫЕ DNS-СЕРВЕРЫ (IPv4 :53)               ${CYAN}║${NC}"
+    echo -e "${CYAN}╠══════════════════════════════════════════════════════════════════════╣${NC}"
+    echo -e "${CYAN}║${NC}  Текущие DNS: ${GREEN}$(get_sys_dns_short)${NC}"
+    echo -e "${CYAN}╚══════════════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    printf "  ${YELLOW}[1]${NC}  %-22s %-32s %-18b %s\n" "Cloudflare" "1.1.1.1 / 1.0.0.1" "$(format_dns_ping "$p1")" "(Без фильтрации, ультрабыстрый)"
+    printf "  ${YELLOW}[2]${NC}  %-22s %-32s %-18b %s\n" "Google Public DNS" "8.8.8.8 / 8.8.4.4" "$(format_dns_ping "$p2")" "(Без фильтрации, глобальный)"
+    printf "  ${YELLOW}[3]${NC}  %-22s %-32s %-18b %s\n" "Quad9" "9.9.9.9 / 149.112.112.112" "$(format_dns_ping "$p3")" "(Защита от malware / фишинга)"
+    printf "  ${YELLOW}[4]${NC}  %-22s %-32s %-18b %s\n" "Control D" "76.76.2.0 / 76.76.10.0" "$(format_dns_ping "$p4")" "(Без фильтрации, Anycast)"
+    printf "  ${YELLOW}[5]${NC}  %-22s %-32s %-18b %s\n" "AdGuard Non-filtering" "94.140.14.140 / 94.140.14.141" "$(format_dns_ping "$p5")" "(Без фильтрации рекламы)"
+    printf "  ${YELLOW}[6]${NC}  %-22s %-32s %-18b %s\n" "OpenDNS" "208.67.222.222 / 208.67.220.220" "$(format_dns_ping "$p6")" "(Защитные функции Cisco)"
+    printf "  ${YELLOW}[7]${NC}  %-22s %-32s %-18b %s\n" "Comodo Secure DNS" "8.26.56.26 / 8.20.247.20" "$(format_dns_ping "$p7")" "(Безопасность Comodo)"
+    printf "  ${YELLOW}[8]${NC}  %-22s %-32s %-18b %s\n" "CleanBrowsing Security" "185.228.168.9 / 185.228.169.9" "$(format_dns_ping "$p8")" "(Malware / Phishing защита)"
+    printf "  ${YELLOW}[9]${NC}  %-22s %-32s %-18b %s\n" "SafeDNS" "195.46.39.39 / 195.46.39.40" "$(format_dns_ping "$p9")" "(Фильтрация сетевых угроз)"
+    printf "  ${YELLOW}[10]${NC} %-22s %-32s %-18b %s\n" "Verisign / Vercara" "64.6.64.6 / 64.6.65.6" "$(format_dns_ping "$p10")" "(Базовый надёжный DNS)"
+    echo ""
+    echo -e "  ${YELLOW}[0]${NC}  Назад"
+    echo ""
+    read -p "Выберите DNS-сервер [0-10]: " for_choice
+    case "$for_choice" in
+        1) apply_system_dns "1.1.1.1" "1.0.0.1" "Cloudflare" ;;
+        2) apply_system_dns "8.8.8.8" "8.8.4.4" "Google Public DNS" ;;
+        3) apply_system_dns "9.9.9.9" "149.112.112.112" "Quad9" ;;
+        4) apply_system_dns "76.76.2.0" "76.76.10.0" "Control D" ;;
+        5) apply_system_dns "94.140.14.140" "94.140.14.141" "AdGuard Non-filtering" ;;
+        6) apply_system_dns "208.67.222.222" "208.67.220.220" "OpenDNS" ;;
+        7) apply_system_dns "8.26.56.26" "8.20.247.20" "Comodo Secure DNS" ;;
+        8) apply_system_dns "185.228.168.9" "185.228.169.9" "CleanBrowsing Security" ;;
+        9) apply_system_dns "195.46.39.39" "195.46.39.40" "SafeDNS" ;;
+        10) apply_system_dns "64.6.64.6" "64.6.65.6" "Verisign / Vercara" ;;
+        0) return ;;
+        *) echo "Неверный выбор"; sleep 1 ;;
+    esac
+}
+
+reset_system_dns() {
+    clear
+    echo -e "${BOLD}--- Сброс системного DNS ---${NC}"
+    read -p "Сбросить DNS на исходные настройки? [y/N]: " conf_res
+    [[ ! "$conf_res" =~ ^[yY]$ ]] && return
+
+    chattr -i /etc/resolv.conf 2>/dev/null || true
+    rm -f /etc/systemd/resolved.conf.d/99-xmanager-dns.conf 2>/dev/null || true
+    rm -f /etc/x-manager/dns_profile.txt 2>/dev/null || true
+
+    if [ -f /etc/resolv.conf.x-bak ]; then
+        cp /etc/resolv.conf.x-bak /etc/resolv.conf
+        echo -e "${GREEN}✓ Восстановлен исходный /etc/resolv.conf${NC}"
+    else
+        cat > /etc/resolv.conf <<EOF
+nameserver 1.1.1.1
+nameserver 8.8.8.8
+EOF
+        echo -e "${GREEN}✓ Установлен стандартный fallback DNS (1.1.1.1, 8.8.8.8)${NC}"
+    fi
+
+    systemctl restart systemd-resolved 2>/dev/null || true
+    sleep 1
+    echo -e "Текущие DNS: ${GREEN}$(get_sys_dns_short)${NC}"
+    read -p "Нажмите Enter для возврата..."
+}
+
+menu_dns_system() {
+    while true; do
+        clear
+        echo -e "${CYAN}╔══════════════════════════════════════════════════════════════════════╗${NC}"
+        echo -e "${CYAN}║${BOLD}              УПРАВЛЕНИЕ СИСТЕМНЫМ DNS СЕРВЕРА                        ${CYAN}║${NC}"
+        echo -e "${CYAN}╠══════════════════════════════════════════════════════════════════════╣${NC}"
+        echo -e "${CYAN}║${NC}  Текущие системные DNS: ${GREEN}${BOLD}$(get_sys_dns_short)${NC}"
+        local active_prof="Пользовательский"
+        [ -f /etc/x-manager/dns_profile.txt ] && active_prof=$(cat /etc/x-manager/dns_profile.txt | awk -F'|' '{print $1}')
+        echo -e "${CYAN}║${NC}  Активный профиль:      ${CYAN}${active_prof}${NC}"
+        echo -e "${CYAN}╚══════════════════════════════════════════════════════════════════════╝${NC}"
+        echo ""
+        echo -e "  ${YELLOW}[1]${NC} 🇷🇺 ${BOLD}Российские DNS-серверы${NC} (Yandex, Safe, Family, SkyDNS, Comss, MTS)"
+        echo -e "  ${YELLOW}[2]${NC} 🌍 ${BOLD}Зарубежные DNS-серверы${NC} (Cloudflare, Google, Quad9, Control D, AdGuard...)"
+        echo -e "  ${YELLOW}[3]${NC} ✍️  ${BOLD}Указать свой DNS вручную${NC} (Primary + Secondary IPv4)"
+        echo -e "  ${YELLOW}[4]${NC} 🔄 ${BOLD}Сбросить DNS на стандартный${NC} (DHCP / от провайдера)"
+        echo -e "  ${YELLOW}[5]${NC} 🧪 ${BOLD}Тест разрешения доменов${NC} (Проверка ya.ru и google.com)"
+        echo -e "  ${YELLOW}[0]${NC} Назад"
+        echo ""
+        read -p "Выберите раздел [0-5]: " dns_top_ch
+        case "$dns_top_ch" in
+            1) menu_dns_russian ;;
+            2) menu_dns_foreign ;;
+            3)
+                clear
+                echo -e "${BOLD}--- Ручной ввод системных DNS ---${NC}"
+                read -p "Введите основной DNS (Primary IPv4): " custom_p
+                [ -z "$custom_p" ] && continue
+                read -p "Введите резервный DNS (Secondary IPv4, можно оставить пустым): " custom_s
+                apply_system_dns "$custom_p" "$custom_s" "Ручной ввод"
+                ;;
+            4) reset_system_dns ;;
+            5)
+                clear
+                echo -e "${BOLD}--- Тест разрешения доменов через текущий системный DNS ---${NC}"
+                echo -e "Текущие DNS: ${CYAN}$(get_sys_dns_short)${NC}"
+                echo ""
+                echo -e "Тестирование ya.ru..."
+                local t_ya=$(getent ahostsv4 ya.ru 2>/dev/null | head -n2)
+                [ -n "$t_ya" ] && echo -e "${GREEN}✓ ya.ru разрешен:${NC}\n$t_ya" || echo -e "${RED}✗ ya.ru не разрешился!${NC}"
+                echo ""
+                echo -e "Тестирование google.com..."
+                local t_goog=$(getent ahostsv4 google.com 2>/dev/null | head -n2)
+                [ -n "$t_goog" ] && echo -e "${GREEN}✓ google.com разрешен:${NC}\n$t_goog" || echo -e "${RED}✗ google.com не разрешился!${NC}"
+                echo ""
+                read -p "Нажмите Enter для возврата..."
+                ;;
+            0) return ;;
+            *) echo "Неверный выбор"; sleep 1 ;;
+        esac
+    done
+}
+
+# ------------------------------------------------------------------------------
+# BBR И СЕТЕВЫЕ БУФЕРЫ (ТЮНИНГ ПОД RAM)
+# ------------------------------------------------------------------------------
+apply_adaptive_bbr_tuning() {
+    clear
+    echo -e "${BOLD}--- Адаптивная оптимизация сетевых буферов и TCP BBR ---${NC}"
+    local ram_mb=$(free -m | awk '/^Mem:/{print $2}')
+    echo -e "Обнаружен объём оперативной памяти: ${CYAN}${ram_mb} MB${NC}"
+
+    local rmem=16777216
+    local wmem=16777216
+    local somax=8192
+    local syn_backlog=8192
+    local tw_buckets=200000
+    local prof_name="Standard Proxy VPS (1.5G - 4G)"
+
+    if [ "$ram_mb" -lt 1500 ]; then
+        prof_name="Low RAM VPS (до 1.5 ГБ)"
+        rmem=8388608
+        wmem=8388608
+        somax=4096
+        syn_backlog=4096
+        tw_buckets=50000
+    elif [ "$ram_mb" -gt 5000 ]; then
+        prof_name="High Performance Server (> 4 ГБ)"
+        rmem=33554432
+        wmem=33554432
+        somax=32768
+        syn_backlog=16384
+        tw_buckets=500000
+    fi
+
+    echo -e "Выбран оптимизационный профиль: ${GREEN}${prof_name}${NC}"
+    echo -e "  • Алгоритм контроля перегрузки: ${BOLD}BBR + FQ${NC}"
+    echo -e "  • Буферы сокетов rmem/wmem:     ${BOLD}$((rmem / 1048576)) MB${NC}"
+    echo -e "  • Лимит очереди соединений:     ${BOLD}somaxconn = ${somax}${NC}"
+    echo -e "  • TCP Fast Open:                ${BOLD}3 (Включен для входящих и исходящих)${NC}"
+    echo ""
+
+    modprobe tcp_bbr 2>/dev/null || true
+    echo "tcp_bbr" > /etc/modules-load.d/bbr.conf 2>/dev/null || true
+
+    [ -f /etc/sysctl.d/99-network-tuning.conf ] && cp /etc/sysctl.d/99-network-tuning.conf /etc/sysctl.d/99-network-tuning.conf.bak 2>/dev/null || true
+
+    cat > /etc/sysctl.d/99-network-tuning.conf <<EOF
+# Оптимизация сети и TCP BBR от x-manager
+# Профиль: ${prof_name} (RAM: ${ram_mb} MB)
+
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+
+net.core.rmem_max = ${rmem}
+net.core.wmem_max = ${wmem}
+net.core.rmem_default = 524288
+net.core.wmem_default = 524288
+net.ipv4.tcp_rmem = 4096 87380 ${rmem}
+net.ipv4.tcp_wmem = 4096 65536 ${wmem}
+
+net.core.somaxconn = ${somax}
+net.core.netdev_max_backlog = 10000
+net.ipv4.tcp_max_syn_backlog = ${syn_backlog}
+net.ipv4.tcp_max_tw_buckets = ${tw_buckets}
+
+net.ipv4.tcp_fastopen = 3
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.tcp_fin_timeout = 20
+net.ipv4.tcp_slow_start_after_idle = 0
+net.ipv4.tcp_keepalive_time = 300
+net.ipv4.tcp_keepalive_intvl = 30
+net.ipv4.tcp_keepalive_probes = 5
+net.ipv4.tcp_mtu_probing = 1
+fs.file-max = 1048576
+EOF
+
+    sysctl -p /etc/sysctl.d/99-network-tuning.conf >/dev/null 2>&1 || sysctl --system >/dev/null 2>&1
+
+    sleep 1
+    local new_cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
+    local new_qd=$(sysctl -n net.core.default_qdisc 2>/dev/null)
+    local new_tfo=$(sysctl -n net.ipv4.tcp_fastopen 2>/dev/null)
+
+    echo -e "${GREEN}✓ Оптимизация успешно применена!${NC}"
+    echo -e "  • Текущий алгоритм: ${GREEN}${new_cc}${NC} (очередь: ${GREEN}${new_qd}${NC})"
+    echo -e "  • TCP Fast Open:    ${GREEN}${new_tfo}${NC}"
+    echo -e "  • Конфиг сохранен в: ${CYAN}/etc/sysctl.d/99-network-tuning.conf${NC}"
+    echo ""
+    read -p "Нажмите Enter для возврата..."
+}
+
+menu_bbr_tuning() {
+    while true; do
+        clear
+        local cur_cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "неизвестно")
+        local cur_qd=$(sysctl -n net.core.default_qdisc 2>/dev/null || echo "неизвестно")
+        local ram_total=$(free -h 2>/dev/null | awk '/^Mem:/{print $2}')
+        local ram_mb=$(free -m 2>/dev/null | awk '/^Mem:/{print $2}')
+        local cpus=$(nproc 2>/dev/null || echo "1")
+        local kern=$(uname -r)
+
+        echo -e "${CYAN}╔══════════════════════════════════════════════════════════════════════╗${NC}"
+        echo -e "${CYAN}║${BOLD}         BBR И АДАПТИВНАЯ ОПТИМИЗАЦИЯ СЕТЕВЫХ БУФЕРОВ           ${CYAN}║${NC}"
+        echo -e "${CYAN}╠══════════════════════════════════════════════════════════════════════╣${NC}"
+        echo -e "${CYAN}║${NC}  Сервер:   ${BOLD}${SERVER_IP}${NC}  |  CPU: ${BOLD}${cpus} ядра${NC}  |  RAM: ${BOLD}${ram_total}${NC}  |  Ядро: ${kern}"
+        echo -e "${CYAN}║${NC}"
+        if [ "$cur_cc" = "bbr" ] && [ "$cur_qd" = "fq" ]; then
+            echo -e "${CYAN}║${NC}  Статус BBR:      ${GREEN}${BOLD}✓ BBR АКТИВЕН (контроль: bbr, очередь: fq)${NC}"
+        elif [ "$cur_cc" = "bbr" ]; then
+            echo -e "${CYAN}║${NC}  Статус BBR:      ${GREEN}${BOLD}✓ BBR активен${NC} (очередь: ${cur_qd})"
+        else
+            echo -e "${CYAN}║${NC}  Статус BBR:      ${YELLOW}⚠ ВЫКЛЮЧЕН (алгоритм: ${cur_cc}, очередь: ${cur_qd})${NC}"
+        fi
+        echo -e "${CYAN}║${NC}  TCP Fast Open:   $(sysctl -n net.ipv4.tcp_fastopen 2>/dev/null || echo '0') (3 = Client+Server)"
+        echo -e "${CYAN}║${NC}  Буфер приёма:    $(sysctl -n net.core.rmem_max 2>/dev/null || echo 'N/A') байт"
+        echo -e "${CYAN}║${NC}  Буфер отправки:  $(sysctl -n net.core.wmem_max 2>/dev/null || echo 'N/A') байт"
+        echo -e "${CYAN}║${NC}  Макс. соединений: somaxconn = $(sysctl -n net.core.somaxconn 2>/dev/null || echo 'N/A')"
+        echo -e "${CYAN}╚══════════════════════════════════════════════════════════════════════╝${NC}"
+        echo ""
+        echo -e "  ${YELLOW}[1]${NC} 🚀 ${BOLD}Включить BBR и оптимизировать буферы под RAM сервера (${ram_total})${NC}"
+        echo -e "  ${YELLOW}[2]${NC} 📊 Просмотреть текущую полную конфигурацию sysctl"
+        echo -e "  ${YELLOW}[3]${NC} 🔄 Перепроверить статус BBR"
+        echo -e "  ${YELLOW}[0]${NC} Назад"
+        echo ""
+        read -p "Выберите действие [0-3]: " bbr_choice
+        case "$bbr_choice" in
+            1) apply_adaptive_bbr_tuning ;;
+            2)
+                clear
+                echo -e "${BOLD}--- Текущие параметры сети и ядра (sysctl) ---${NC}"
+                sysctl net.ipv4.tcp_congestion_control net.core.default_qdisc net.ipv4.tcp_fastopen net.core.rmem_max net.core.wmem_max net.core.somaxconn net.ipv4.tcp_max_syn_backlog net.ipv4.tcp_tw_reuse net.ipv4.tcp_fin_timeout fs.file-max
+                echo ""
+                read -p "Нажмите Enter для возврата..."
+                ;;
+            3) sleep 0.5 ;;
+            0) return ;;
+            *) echo "Неверный выбор"; sleep 1 ;;
+        esac
+    done
+}
+
+# ------------------------------------------------------------------------------
+# ФАЙЛ ПОДКАЧКИ SWAP (ВЫБОР 2G / 4G / УДАЛЕНИЕ)
+# ------------------------------------------------------------------------------
+create_or_resize_swap() {
+    local target_gb="$1"
+    local target_mb=$((target_gb * 1024))
+    clear
+    echo -e "${BOLD}--- Создание файла подкачки Swap ${target_gb} ГБ ---${NC}"
+
+    local cur_swap_mb=$(free -m 2>/dev/null | awk '/^Swap:/{print $2}')
+    local cur_swap_used=$(free -m 2>/dev/null | awk '/^Swap:/{print $3}')
+    local free_ram_mb=$(free -m 2>/dev/null | awk '/^Mem:/{print $4}')
+    local disk_free_mb=$(df -m / 2>/dev/null | awk 'NR==2{print $4}')
+
+    local required_mb=$((target_mb + 500))
+    if [ "$disk_free_mb" -lt "$required_mb" ]; then
+        echo -e "${RED}❌ Ошибка: недостаточно места на диске!${NC}"
+        echo -e "Требуется минимум: ${required_mb} MB, свободно: ${disk_free_mb} MB."
+        read -p "Нажмите Enter для возврата..."
+        return
+    fi
+
+    if [ -n "$cur_swap_mb" ] && [ "$cur_swap_mb" -gt 0 ]; then
+        echo -e "${YELLOW}Обнаружен существующий Swap: ${cur_swap_mb} MB (занято: ${cur_swap_used} MB).${NC}"
+        if [ "$cur_swap_mb" -eq "$target_mb" ]; then
+            read -p "Swap уже имеет размер ${target_gb} ГБ. Пересоздать заново? [y/N]: " confirm_recreate
+            [[ ! "$confirm_recreate" =~ ^[yY]$ ]] && return
+        else
+            read -p "Изменить текущий Swap (${cur_swap_mb} MB) на ${target_gb} ГБ? [Y/n]: " confirm_change
+            [[ "$confirm_change" =~ ^[nN]$ ]] && return
+        fi
+
+        echo -e "${YELLOW}Безопасное отключение текущего Swap (swapoff)...${NC}"
+        swapoff -a 2>/dev/null || true
+    fi
+
+    [ -f /swapfile ] && rm -f /swapfile
+
+    echo -e "${YELLOW}Выделение файла /swapfile размером ${target_gb} ГБ...${NC}"
+    if ! fallocate -l "${target_gb}G" /swapfile 2>/dev/null; then
+        echo -e "${YELLOW}fallocate не поддерживается файловой системой, создаём через dd...${NC}"
+        dd if=/dev/zero of=/swapfile bs=1M count="$target_mb" status=none
+    fi
+
+    chmod 600 /swapfile
+    mkswap /swapfile >/dev/null 2>&1
+
+    if ! swapon /swapfile 2>/dev/null; then
+        echo -e "${YELLOW}Повторная инициализация через dd...${NC}"
+        rm -f /swapfile
+        dd if=/dev/zero of=/swapfile bs=1M count="$target_mb" status=none
+        chmod 600 /swapfile
+        mkswap /swapfile >/dev/null 2>&1
+        swapon /swapfile
+    fi
+
+    sed -i '\|/swapfile|d' /etc/fstab 2>/dev/null || true
+    echo '/swapfile none swap sw 0 0' >> /etc/fstab
+
+    mkdir -p /etc/sysctl.d 2>/dev/null || true
+    cat > /etc/sysctl.d/99-swap.conf <<EOF
+vm.swappiness = 10
+vm.vfs_cache_pressure = 50
+EOF
+    sysctl -p /etc/sysctl.d/99-swap.conf >/dev/null 2>&1 || true
+
+    echo ""
+    echo -e "${GREEN}✓ Swap-файл ${target_gb} ГБ успешно создан и подключен!${NC}"
+    echo ""
+    free -h
+    echo ""
+    read -p "Нажмите Enter для возврата..."
+}
+
+remove_swap() {
+    clear
+    echo -e "${BOLD}--- Отключение и удаление Swap-файла ---${NC}"
+    local cur_swap_mb=$(free -m 2>/dev/null | awk '/^Swap:/{print $2}')
+    if [ -z "$cur_swap_mb" ] || [ "$cur_swap_mb" -eq 0 ]; then
+        echo -e "${YELLOW}Swap не обнаружен или уже отключен.${NC}"
+        sleep 2
+        return
+    fi
+
+    read -p "Вы уверены, что хотите полностью отключить и удалить Swap? [y/N]: " confirm_del
+    [[ ! "$confirm_del" =~ ^[yY]$ ]] && return
+
+    echo -e "${YELLOW}Отключение подкачки (swapoff)...${NC}"
+    swapoff -a 2>/dev/null || true
+    [ -f /swapfile ] && rm -f /swapfile
+    sed -i '\|/swapfile|d' /etc/fstab 2>/dev/null || true
+    rm -f /etc/sysctl.d/99-swap.conf 2>/dev/null || true
+
+    echo -e "${GREEN}✓ Swap успешно отключен и удален!${NC}"
+    sleep 2
+}
+
+configure_swappiness() {
+    clear
+    echo -e "${BOLD}--- Настройка vm.swappiness (агрессивность использования Swap) ---${NC}"
+    echo -e "Текущее значение: ${GREEN}$(sysctl -n vm.swappiness 2>/dev/null)${NC}"
+    echo ""
+    echo -e "  ${YELLOW}[1]${NC} 10 (Рекомендуется для SSD/NVMe — использование памяти до последнего)"
+    echo -e "  ${YELLOW}[2]${NC} 20 (Сбалансированное значение)"
+    echo -e "  ${YELLOW}[3]${NC} 60 (Стандартное значение ядра Linux)"
+    echo -e "  ${YELLOW}[4]${NC} Ввести своё значение (0-100)"
+    echo -e "  ${YELLOW}[0]${NC} Отмена"
+    echo ""
+    read -p "Выберите вариант [0-4]: " swp_c
+    local val=""
+    case "$swp_c" in
+        1) val="10" ;;
+        2) val="20" ;;
+        3) val="60" ;;
+        4) read -p "Введите значение (0-100): " val ;;
+        *) return ;;
+    esac
+    if [ -n "$val" ]; then
+        mkdir -p /etc/sysctl.d 2>/dev/null || true
+        echo "vm.swappiness = $val" > /etc/sysctl.d/99-swap.conf
+        echo "vm.vfs_cache_pressure = 50" >> /etc/sysctl.d/99-swap.conf
+        sysctl -p /etc/sysctl.d/99-swap.conf >/dev/null 2>&1 || true
+        echo -e "${GREEN}✓ Установлен vm.swappiness = $val${NC}"
+        sleep 2
+    fi
+}
+
+menu_swap_manager() {
+    while true; do
+        clear
+        local swap_total_mb=$(free -m 2>/dev/null | awk '/^Swap:/{print $2}')
+        local swap_used_mb=$(free -m 2>/dev/null | awk '/^Swap:/{print $3}')
+        local swap_free_mb=$(free -m 2>/dev/null | awk '/^Swap:/{print $4}')
+        local swap_total_h=$(free -h 2>/dev/null | awk '/^Swap:/{print $2}')
+        local swap_used_h=$(free -h 2>/dev/null | awk '/^Swap:/{print $3}')
+        local cur_swappiness=$(sysctl -n vm.swappiness 2>/dev/null || echo "60")
+        local cur_swap_path=$(swapon --show=NAME --noheadings 2>/dev/null | head -n1)
+        local disk_free_mb=$(df -m / 2>/dev/null | awk 'NR==2{print $4}')
+
+        echo -e "${CYAN}╔══════════════════════════════════════════════════════════════════════╗${NC}"
+        echo -e "${CYAN}║${BOLD}               УПРАВЛЕНИЕ ФАЙЛОМ ПОДКАЧКИ (SWAP)               ${CYAN}║${NC}"
+        echo -e "${CYAN}╠══════════════════════════════════════════════════════════════════════╣${NC}"
+        if [ -n "$swap_total_mb" ] && [ "$swap_total_mb" -gt 0 ]; then
+            echo -e "${CYAN}║${NC}  Статус Swap:      ${GREEN}${BOLD}АКТИВЕН (${swap_total_h})${NC}"
+            echo -e "${CYAN}║${NC}  Использование:    ${BOLD}${swap_used_h}${NC} занято / свободно: ${BOLD}${swap_free_mb} MB${NC}"
+            echo -e "${CYAN}║${NC}  Файл подкачки:    ${CYAN}${cur_swap_path}${NC}"
+        else
+            echo -e "${CYAN}║${NC}  Статус Swap:      ${YELLOW}${BOLD}НЕ СОЗДАН (0 MB)${NC}"
+        fi
+        echo -e "${CYAN}║${NC}  Swappiness:       ${BOLD}${cur_swappiness}${NC} (Рекомендуется 10 для SSD)"
+        echo -e "${CYAN}║${NC}  Свободно на диске: ${BOLD}${disk_free_mb} MB${NC}"
+        echo -e "${CYAN}╚══════════════════════════════════════════════════════════════════════╝${NC}"
+        echo ""
+        echo -e "  ${YELLOW}[1]${NC} 💾 Создать / Пересоздать Swap-файл ${BOLD}2 ГБ${NC} (/swapfile)"
+        echo -e "  ${YELLOW}[2]${NC} 💾 Создать / Пересоздать Swap-файл ${BOLD}4 ГБ${NC} (/swapfile)"
+        echo -e "  ${YELLOW}[3]${NC} ⚙️  Настроить swappiness (10 / 20 / 60)"
+        echo -e "  ${YELLOW}[4]${NC} 🗑️  Отключить и удалить Swap-файл"
+        echo -e "  ${YELLOW}[0]${NC} Назад"
+        echo ""
+        read -p "Выберите действие [0-4]: " sw_choice
+        case "$sw_choice" in
+            1) create_or_resize_swap 2 ;;
+            2) create_or_resize_swap 4 ;;
+            3) configure_swappiness ;;
+            4) remove_swap ;;
+            0) return ;;
+            *) echo "Неверный выбор"; sleep 1 ;;
+        esac
+    done
+}
+
+# ------------------------------------------------------------------------------
+# FAIL2BAN: УСТАНОВКА И УПРАВЛЕНИЕ ЗАЩИТОЙ SSH
+# ------------------------------------------------------------------------------
+detect_ssh_port() {
+    local p=$(ss -tlnp 2>/dev/null | grep -E 'sshd|/sshd' | awk '{print $4}' | awk -F':' '{print $NF}' | head -n1)
+    if [ -z "$p" ]; then
+        p=$(grep -a -E "^[[:space:]]*Port[[:space:]]+" /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' | head -n1)
+    fi
+    if [ -z "$p" ] && [ -n "$SSH_CONNECTION" ]; then
+        p=$(echo "$SSH_CONNECTION" | awk '{print $4}')
+    fi
+    [ -z "$p" ] && p="22"
+    echo "$p"
+}
+
+sync_fail2ban_ssh_port() {
+    local ssh_p=$(detect_ssh_port)
+    mkdir -p /etc/fail2ban/jail.d 2>/dev/null || true
+
+    cat > /etc/fail2ban/jail.d/99-xmanager-ssh.local <<EOF
+[sshd]
+enabled = true
+port = ${ssh_p}
+filter = sshd
+backend = systemd
+maxretry = 5
+findtime = 10m
+bantime = 1h
+ignoreip = 127.0.0.1/8 ::1
+EOF
+    systemctl restart fail2ban 2>/dev/null || true
+    echo -e "${GREEN}✓ Защита SSH настроена для порта :${ssh_p} (/etc/fail2ban/jail.d/99-xmanager-ssh.local)${NC}"
+}
+
+install_configure_fail2ban() {
+    clear
+    echo -e "${BOLD}--- Установка и базовая настройка Fail2ban ---${NC}"
+    local ssh_p=$(detect_ssh_port)
+    echo -e "Обнаружен рабочий порт SSH: ${CYAN}:${ssh_p}${NC}"
+    echo ""
+
+    if ! which fail2ban-client >/dev/null 2>&1; then
+        echo -e "${YELLOW}Установка пакета fail2ban через apt...${NC}"
+        apt-get update -y >/dev/null 2>&1
+        apt-get install -y fail2ban
+    fi
+
+    sync_fail2ban_ssh_port
+    systemctl enable fail2ban 2>/dev/null || true
+    systemctl restart fail2ban 2>/dev/null || true
+    sleep 2
+
+    if systemctl is-active --quiet fail2ban; then
+        echo -e "${GREEN}✓ Fail2ban успешно установлен и запущен!${NC}"
+        echo -e "  • Защита SSH: порт ${CYAN}:${ssh_p}${NC}"
+        echo -e "  • Время бана:  ${BOLD}1 час${NC}"
+        echo -e "  • Лимит:       ${BOLD}5 неудачных попыток за 10 минут${NC}"
+    else
+        echo -e "${RED}✗ Ошибка запуска службы fail2ban!${NC}"
+        journalctl -u fail2ban -n 8 --no-pager
+    fi
+    echo ""
+    read -p "Нажмите Enter для возврата..."
+}
+
+show_fail2ban_banned() {
+    clear
+    echo -e "${BOLD}--- Список заблокированных IP-адресов Fail2ban ---${NC}"
+    echo ""
+    local jails=$(fail2ban-client status 2>/dev/null | grep "Jail list:" | sed 's/.*Jail list:[[:space:]]*//')
+    if [ -z "$jails" ]; then
+        echo -e "${YELLOW}Нет активных джейлов.${NC}"
+    else
+        for j in $(echo "$jails" | tr ',' ' '); do
+            echo -e "${CYAN}${BOLD}=== Джейл: ${j} ===${NC}"
+            fail2ban-client status "$j" 2>/dev/null | grep -E "Currently failed:|Total failed:|Currently banned:|Total banned:|Banned IP list:"
+            echo ""
+        done
+    fi
+    read -p "Нажмите Enter для возврата..."
+}
+
+unban_ip_fail2ban() {
+    clear
+    echo -e "${BOLD}--- Разблокировка IP-адреса (Unban) ---${NC}"
+    echo ""
+    read -p "Введите IP-адрес для разблокировки (или 'all' для разбана всех): " un_ip
+    [ -z "$un_ip" ] && return
+
+    local jails=$(fail2ban-client status 2>/dev/null | grep "Jail list:" | sed 's/.*Jail list:[[:space:]]*//')
+    if [ "$un_ip" = "all" ]; then
+        echo -e "${YELLOW}Снятие бана со всех IP во всех джейлах...${NC}"
+        for j in $(echo "$jails" | tr ',' ' '); do
+            fail2ban-client unban --all 2>/dev/null || true
+        done
+        echo -e "${GREEN}✓ Все IP успешно разблокированы!${NC}"
+    else
+        for j in $(echo "$jails" | tr ',' ' '); do
+            fail2ban-client set "$j" unbanip "$un_ip" 2>/dev/null || true
+        done
+        echo -e "${GREEN}✓ Команда разблокировки отправлена для ${un_ip}${NC}"
+    fi
+    sleep 2
+}
+
+ban_ip_fail2ban() {
+    clear
+    echo -e "${BOLD}--- Ручная блокировка IP-адреса (Ban) ---${NC}"
+    echo ""
+    read -p "Введите IP-адрес для блокировки: " b_ip
+    [ -z "$b_ip" ] && return
+
+    fail2ban-client set sshd banip "$b_ip" 2>/dev/null || true
+    echo -e "${GREEN}✓ IP-адрес ${b_ip} заблокирован в джейле sshd!${NC}"
+    sleep 2
+}
+
+configure_fail2ban_timings() {
+    clear
+    echo -e "${BOLD}--- Настройка времени блокировки Fail2ban ---${NC}"
+    echo ""
+    echo -e "  ${YELLOW}[1]${NC} 1 час (3600 с, 5 попыток)"
+    echo -e "  ${YELLOW}[2]${NC} 24 часа (86400 с, 3 попытки)"
+    echo -e "  ${YELLOW}[3]${NC} 7 дней (604800 с, 3 попытки)"
+    echo -e "  ${YELLOW}[4]${NC} Навсегда (-1, 3 попытки)"
+    echo -e "  ${YELLOW}[0]${NC} Отмена"
+    echo ""
+    read -p "Выберите вариант [0-4]: " t_ch
+    local b_time="1h"
+    local m_retry="5"
+    case "$t_ch" in
+        1) b_time="1h"; m_retry="5" ;;
+        2) b_time="24h"; m_retry="3" ;;
+        3) b_time="7d"; m_retry="3" ;;
+        4) b_time="-1"; m_retry="3" ;;
+        *) return ;;
+    esac
+
+    local ssh_p=$(detect_ssh_port)
+    cat > /etc/fail2ban/jail.d/99-xmanager-ssh.local <<EOF
+[sshd]
+enabled = true
+port = ${ssh_p}
+filter = sshd
+backend = systemd
+maxretry = ${m_retry}
+findtime = 10m
+bantime = ${b_time}
+ignoreip = 127.0.0.1/8 ::1
+EOF
+    systemctl restart fail2ban 2>/dev/null || true
+    echo -e "${GREEN}✓ Параметры сохранены: bantime=${b_time}, maxretry=${m_retry}${NC}"
+    sleep 2
+}
+
+menu_fail2ban() {
+    while true; do
+        clear
+        local is_inst=false
+        local is_act=false
+        which fail2ban-client >/dev/null 2>&1 && is_inst=true
+        systemctl is-active --quiet fail2ban 2>/dev/null && is_act=true
+        local ssh_p=$(detect_ssh_port)
+
+        echo -e "${CYAN}╔══════════════════════════════════════════════════════════════════════╗${NC}"
+        echo -e "${CYAN}║${BOLD}                  УПРАВЛЕНИЕ ЗАЩИТОЙ FAIL2BAN                  ${CYAN}║${NC}"
+        echo -e "${CYAN}╠══════════════════════════════════════════════════════════════════════╣${NC}"
+        if ! $is_inst; then
+            echo -e "${CYAN}║${NC}  Статус:          ${RED}${BOLD}НЕ УСТАНОВЛЕН${NC}"
+            echo -e "${CYAN}║${NC}  Порт SSH:        ${CYAN}:${ssh_p}${NC}"
+            echo -e "${CYAN}╚══════════════════════════════════════════════════════════════════════╝${NC}"
+            echo ""
+            echo -e "  ${YELLOW}[1]${NC} 🛡️  ${BOLD}Установить Fail2ban и включить защиту SSH (порт :${ssh_p})${NC}"
+            echo -e "  ${YELLOW}[0]${NC} Назад"
+            echo ""
+            read -p "Выберите действие [0-1]: " f2b_ch
+            case "$f2b_ch" in
+                1) install_configure_fail2ban ;;
+                0) return ;;
+                *) echo "Неверный выбор"; sleep 1 ;;
+            esac
+            continue
+        fi
+
+        local jails=$(fail2ban-client status 2>/dev/null | grep "Jail list:" | sed 's/.*Jail list:[[:space:]]*//')
+        local banned_cnt=0
+        if [ -n "$jails" ]; then
+            for j in $(echo "$jails" | tr ',' ' '); do
+                local cnt=$(fail2ban-client status "$j" 2>/dev/null | awk -F':' '/Currently banned/{print $2}' | tr -d ' ')
+                [ -n "$cnt" ] && banned_cnt=$((banned_cnt + cnt))
+            done
+        fi
+
+        if $is_act; then
+            echo -e "${CYAN}║${NC}  Статус:          ${GREEN}${BOLD}АКТИВЕН (Служба работает)${NC}"
+            echo -e "${CYAN}║${NC}  Активные джейлы: ${GREEN}${jails:-Нет}${NC}"
+            echo -e "${CYAN}║${NC}  Забанено IP:     ${YELLOW}${banned_cnt} IP${NC}"
+        else
+            echo -e "${CYAN}║${NC}  Статус:          ${YELLOW}${BOLD}ОСТАНОВЛЕН (Установлен)${NC}"
+        fi
+        echo -e "${CYAN}║${NC}  Порт SSH:        ${CYAN}:${ssh_p}${NC}"
+        echo -e "${CYAN}╚══════════════════════════════════════════════════════════════════════╝${NC}"
+        echo ""
+        echo -e "  ${YELLOW}[1]${NC} 📋 Список заблокированных IP-адресов"
+        echo -e "  ${YELLOW}[2]${NC} 🔓 Разблокировать IP-адрес (Unban IP)"
+        echo -e "  ${YELLOW}[3]${NC} 🔒 Заблокировать IP-адрес вручную (Ban IP)"
+        echo -e "  ${YELLOW}[4]${NC} ⏱️  Настроить параметры бана (время бана, попытки)"
+        echo -e "  ${YELLOW}[5]${NC} 🎯 Проверить / синхронизировать защиту порта SSH (:${ssh_p})"
+        echo -e "  ${YELLOW}[6]${NC} 🔄 Перезапустить службу Fail2ban"
+        echo -e "  ${YELLOW}[7]${NC} 🛑 Остановить / Запустить Fail2ban"
+        echo -e "  ${YELLOW}[0]${NC} Назад"
+        echo ""
+        read -p "Выберите действие [0-7]: " f2b_ch
+        case "$f2b_ch" in
+            1) show_fail2ban_banned ;;
+            2) unban_ip_fail2ban ;;
+            3) ban_ip_fail2ban ;;
+            4) configure_fail2ban_timings ;;
+            5) sync_fail2ban_ssh_port ;;
+            6)
+                systemctl restart fail2ban
+                echo -e "${GREEN}✓ Fail2ban успешно перезапущен!${NC}"
+                sleep 2
+                ;;
+            7)
+                if $is_act; then
+                    systemctl stop fail2ban
+                    echo -e "${YELLOW}Fail2ban остановлен.${NC}"
+                else
+                    systemctl start fail2ban
+                    echo -e "${GREEN}Fail2ban запущен.${NC}"
+                fi
+                sleep 2
+                ;;
+            0) return ;;
+            *) echo "Неверный выбор"; sleep 1 ;;
+        esac
+    done
+}
+
+# ------------------------------------------------------------------------------
+# ГЛАВНЫЙ РАЗДЕЛ: СИСТЕМНЫЕ НАСТРОЙКИ И ОПТИМИЗАЦИЯ
+# ------------------------------------------------------------------------------
+menu_system_opt() {
+    while true; do
+        clear
+        local cur_dns=$(get_sys_dns_short)
+        local cur_bbr=$(get_bbr_short_status)
+        local cur_swap=$(get_swap_short_status)
+        local cur_f2b=$(get_f2b_short_status)
+        local ram_h=$(free -h 2>/dev/null | awk '/^Mem:/{print $2}')
+        local cpus=$(nproc 2>/dev/null || echo "1")
+        local kern=$(uname -r)
+
+        echo -e "${CYAN}╔══════════════════════════════════════════════════════════════════════╗${NC}"
+        echo -e "${CYAN}║${BOLD}        СИСТЕМНЫЕ НАСТРОЙКИ, ОПТИМИЗАЦИЯ И БЕЗОПАСНОСТЬ        ${CYAN}║${NC}"
+        echo -e "${CYAN}╠══════════════════════════════════════════════════════════════════════╣${NC}"
+        echo -e "${CYAN}║${NC}  Сервер:    ${BOLD}${SERVER_IP}${NC}  |  CPU: ${BOLD}${cpus} ядра${NC}  |  RAM: ${BOLD}${ram_h}${NC}  |  Ядро: ${kern}"
+        echo -e "${CYAN}║${NC}"
+        echo -e "${CYAN}║${NC}  • Системный DNS:  ${GREEN}${cur_dns}${NC}"
+        echo -e "${CYAN}║${NC}  • BBR & Буферы:   ${cur_bbr}"
+        echo -e "${CYAN}║${NC}  • Файл подкачки:  ${cur_swap}"
+        echo -e "${CYAN}║${NC}  • Fail2ban:       ${cur_f2b}"
+        echo -e "${CYAN}╚══════════════════════════════════════════════════════════════════════╝${NC}"
+        echo ""
+        echo -e "  ${GREEN}${BOLD}[1]${NC} 🌐 ${BOLD}Смена системного DNS${NC} (Российские / Зарубежные DNS с пингом)"
+        echo -e "  ${BLUE}${BOLD}[2]${NC} 🚀 ${BOLD}Включить BBR и оптимизировать сетевые буферы${NC} (TCP тюнинг под RAM)"
+        echo -e "  ${PURPLE}${BOLD}[3]${NC} 💾 ${BOLD}Управление файлом подкачки SWAP${NC} (Выбор 2 ГБ / 4 ГБ, статус, удаление)"
+        echo -e "  ${RED}${BOLD}[4]${NC} 🛡️  ${BOLD}Управление Fail2ban${NC} (Установка, защита SSH, забаненные IP, unban)"
+        echo ""
+        echo -e "  ${YELLOW}${BOLD}[5]${NC} 📊 Сводный отчет о характеристиках сервера и сети"
+        echo -e "  ${BOLD}[0]${NC} 🚪 Назад в главное меню"
+        echo ""
+        read -p "Выберите раздел [0-5]: " sys_choice
+        case "$sys_choice" in
+            1) menu_dns_system ;;
+            2) menu_bbr_tuning ;;
+            3) menu_swap_manager ;;
+            4) menu_fail2ban ;;
+            5)
+                clear
+                echo -e "${BOLD}=== СВОДНЫЙ ОТЧЁТ О СИСТЕМЕ И СЕТИ ===${NC}"
+                echo ""
+                echo -e "${CYAN}--- Память и подкачка ---${NC}"
+                free -h
+                echo ""
+                echo -e "${CYAN}--- Дисковое пространство ---${NC}"
+                df -h /
+                echo ""
+                echo -e "${CYAN}--- Сетевые параметры ядра (sysctl) ---${NC}"
+                sysctl net.ipv4.tcp_congestion_control net.core.default_qdisc net.ipv4.tcp_fastopen net.core.rmem_max net.core.wmem_max net.core.somaxconn vm.swappiness
+                echo ""
+                echo -e "${CYAN}--- Системный DNS (/etc/resolv.conf) ---${NC}"
+                cat /etc/resolv.conf | grep -E '^nameserver|^options'
+                echo ""
+                read -p "Нажмите Enter для возврата..."
+                ;;
+            0) return ;;
+            *) echo "Неверный выбор"; sleep 1 ;;
+        esac
+    done
+}
+
 # ==============================================================================
 # ГЛАВНОЕ МЕНЮ ДИСПЕТЧЕРА
 # ==============================================================================
@@ -3149,6 +4128,9 @@ main_hub() {
     elif [ "$invoked" = "x-fw" ] || [ "$invoked" = "x-firewall" ]; then
         menu_firewall
         exit 0
+    elif [ "$invoked" = "x-opt" ] || [ "$invoked" = "x-sys" ] || [ "$invoked" = "x-bbr" ] || [ "$invoked" = "x-swap" ] || [ "$invoked" = "x-f2b" ]; then
+        menu_system_opt
+        exit 0
     fi
 
     while true; do
@@ -3157,6 +4139,7 @@ main_hub() {
         echo -e "${CYAN}║${BOLD}          ЦЕНТР УПРАВЛЕНИЯ ПРОКСИ-СЕРВИСАМИ             ${CYAN}║${NC}"
         echo -e "${CYAN}╠══════════════════════════════════════════════════════════════════════╣${NC}"
         echo -e "${CYAN}║${NC}  Сервер: ${BOLD}${SERVER_IP}${NC}  |  Шлюзы: TPROXY :12345 [127.0.0.1] | SOCKS5 :10808 [127.0.0.1] 🔒"
+        echo -e "${CYAN}║${NC}  Система: BBR: $(get_bbr_short_status)  |  Swap: $(get_swap_short_status)  |  F2B: $(get_f2b_short_status)"
         echo -e "${CYAN}║${NC}"
         if is_mieru_installed; then
             echo -e "${CYAN}║${NC}  ${BOLD}[1] 🚀 Mieru (mita v3.37.0)${NC}   -> $(get_mieru_status)"
@@ -3211,9 +4194,10 @@ main_hub() {
         echo -e "  ${BOLD}[7]${NC} 📊 Сводный статус всех служб и портов сервера"
         echo -e "  ${BOLD}[8]${NC} 🔄 Перезапустить все сервисы (Mieru + Snell + WDTT + CSQTT + DNS)"
         echo -e "  ${BOLD}[9]${NC} 🔍 ${BOLD}Пересканировать и подхватить протоколы${NC} (Автоопределение установленных служб)"
+        echo -e "  ${GREEN}${BOLD}[10]${NC} ⚙️  ${BOLD}Оптимизация и безопасность${NC} (DNS с пингом, BBR/буферы под RAM, Swap 2/4G, Fail2ban)"
         echo -e "  ${BOLD}[0]${NC} 🚪 Выход"
         echo ""
-        read -p "Выберите раздел [0-9]: " top_choice
+        read -p "Выберите раздел [0-10]: " top_choice
         case "$top_choice" in
             1) menu_mieru ;;
             2) menu_snell ;;
@@ -3224,6 +4208,7 @@ main_hub() {
             7) view_global_status ;;
             8) restart_all_services ;;
             9) rescan_and_adopt_protocols ;;
+            10) menu_system_opt ;;
             0) clear; exit 0 ;;
             *) echo "Неверный выбор"; sleep 1 ;;
         esac
