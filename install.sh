@@ -125,8 +125,11 @@ fi
 echo ""
 echo -e "${CYAN}==> Шаг 1: Проверка и установка системных утилит...${NC}"
 export DEBIAN_FRONTEND=noninteractive
+echo -e "  -> Обновление списков пакетов (apt-get update)..."
 apt-get update -qq || true
+echo -e "  -> Проверка необходимых утилит (curl, wget, jq, unzip, python3...)..."
 apt-get install -y -qq curl wget jq unzip iptables qrencode openssl python3 iproute2 >/dev/null 2>&1 || true
+echo -e "  ✓ Системные утилиты готовы"
 
 echo -e "${CYAN}==> Шаг 2: Анализ и настройка шлюзов ядра Xray (3X-UI)...${NC}"
 mkdir -p /etc/x-manager
@@ -297,7 +300,9 @@ if [ "$INSTALL_SNELL" = "yes" ]; then
 
     SNELL_URL="https://dl.nssurge.com/snell/snell-server-v5.0.1-${SNELL_ARCH}.zip"
     tmp_snell="/tmp/snell.zip"
-    if curl -fsSL -o "$tmp_snell" "$SNELL_URL"; then
+    echo -e "  -> Загрузка Snell v5.0.1 (${SNELL_ARCH})..."
+    if curl -fL --progress-bar -o "$tmp_snell" "$SNELL_URL" || curl -fsSL -o "$tmp_snell" "$SNELL_URL"; then
+        echo -e "  -> Распаковка и установка в /usr/local/bin/..."
         unzip -qo "$tmp_snell" -d /usr/local/bin/
         chmod +x /usr/local/bin/snell-server
         rm -f "$tmp_snell"
@@ -388,17 +393,23 @@ if [ "$INSTALL_MIERU" = "yes" ]; then
     esac
 
     if ! command -v mita &>/dev/null; then
-        curl -fsSL -o /tmp/mita.deb "https://github.com/enfein/mieru/releases/download/v${mita_ver}/mita_${mita_ver}_${DEB_ARCH}.deb" 2>/dev/null || true
-        if [ -s /tmp/mita.deb ]; then
-            dpkg -i /tmp/mita.deb 2>/dev/null || apt-get install -f -y 2>/dev/null || true
-            rm -f /tmp/mita.deb
-        else
-            curl -fsSL "https://github.com/enfein/mieru/releases/download/v${mita_ver}/mita_${mita_ver}_linux_${DEB_ARCH}.tar.gz" | tar -xz -C /usr/local/bin/ mita 2>/dev/null || true
+        echo -e "  -> Скачивание пакета Mieru v${mita_ver} с GitHub (~30 MB, подождите)..."
+        if curl -fL --progress-bar -o /tmp/mita.deb "https://github.com/enfein/mieru/releases/download/v${mita_ver}/mita_${mita_ver}_${DEB_ARCH}.deb" || curl -fsSL -o /tmp/mita.deb "https://github.com/enfein/mieru/releases/download/v${mita_ver}/mita_${mita_ver}_${DEB_ARCH}.deb"; then
+            if [ -s /tmp/mita.deb ]; then
+                echo -e "  -> Распаковка и установка пакета mita через dpkg..."
+                dpkg -i /tmp/mita.deb 2>/dev/null || apt-get install -f -y 2>/dev/null || true
+                rm -f /tmp/mita.deb
+            fi
+        fi
+        if ! command -v mita &>/dev/null; then
+            echo -e "  -> Резервный канал: скачивание архива tar.gz..."
+            curl -fL --progress-bar "https://github.com/enfein/mieru/releases/download/v${mita_ver}/mita_${mita_ver}_linux_${DEB_ARCH}.tar.gz" | tar -xz -C /usr/local/bin/ mita 2>/dev/null || true
             chmod +x /usr/local/bin/mita 2>/dev/null || true
         fi
     fi
     ln -sf /usr/bin/mita /usr/local/bin/mita 2>/dev/null || true
     ln -sf /usr/local/bin/mita /usr/bin/mita 2>/dev/null || true
+    echo -e "  -> Формирование конфигурации Anti-TSPU (Low-Entropy, Nonce, Padding)..."
 
     # Конфигурация Mieru с использованием подхваченного SOCKS5 порта
     action="PROXY"
@@ -527,6 +538,7 @@ EOF
         iptables -I INPUT 1 -p "$ipt_proto" --dport "$MIERU_PORTS" -j ACCEPT 2>/dev/null || true
     fi
 
+    echo -e "  -> Запуск и проверка службы mita..."
     systemctl daemon-reload
     systemctl enable mita 2>/dev/null || true
     systemctl restart mita 2>/dev/null || true
@@ -535,6 +547,7 @@ fi
 
 # Интеграция qwdtt с использованием подхваченного TPROXY порта
 echo -e "${CYAN}==> Шаг 5: Интеграция qwdtt / WDTT TPROXY...${NC}"
+echo -e "  -> Настройка скрипта wdtt-tproxy.sh и правил перехвата..."
 cat << EOF > /usr/local/bin/wdtt-tproxy.sh
 #!/usr/bin/env bash
 set -e
@@ -608,12 +621,15 @@ echo -e "  ✓ Внутренние порты ядра Xray (${XRAY_TPROXY_PORT
 echo -e "${CYAN}==> Шаг 7: Развертывание диспетчера x-manager...${NC}"
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 if [ -f "$SCRIPT_DIR/bin/x-manager" ]; then
+    echo -e "  -> Установка x-manager из локального каталога..."
     cp -f "$SCRIPT_DIR/bin/x-manager" /usr/local/bin/x-manager
 else
-    curl -fsSL -o /usr/local/bin/x-manager https://raw.githubusercontent.com/534188-create/x-manager/main/bin/x-manager 2>/dev/null || true
+    echo -e "  -> Загрузка диспетчера x-manager с GitHub..."
+    curl -fL --progress-bar -o /usr/local/bin/x-manager https://raw.githubusercontent.com/534188-create/x-manager/main/bin/x-manager || curl -fsSL -o /usr/local/bin/x-manager https://raw.githubusercontent.com/534188-create/x-manager/main/bin/x-manager 2>/dev/null || true
 fi
 chmod +x /usr/local/bin/x-manager
 
+echo -e "  -> Создание системных алиасов (x-snell, x-mieru, x-wdtt, x-csqtt, x-dns)..."
 ln -sf /usr/local/bin/x-manager /usr/local/bin/x-snell
 ln -sf /usr/local/bin/x-manager /usr/local/bin/x-mieru
 ln -sf /usr/local/bin/x-manager /usr/local/bin/x-wdtt
@@ -622,6 +638,7 @@ ln -sf /usr/local/bin/x-manager /usr/local/bin/x-csqtt
 ln -sf /usr/local/bin/x-manager /usr/local/bin/x-dns
 ln -sf /usr/local/bin/x-manager /usr/local/bin/x-cottendns
 ln -sf /usr/local/bin/x-manager /usr/local/bin/x-masterdns
+echo -e "  ✓ Диспетчер x-manager успешно развернут"
 
 echo ""
 echo -e "${GREEN}${BOLD}══════════════════════════════════════════════════════════════════════${NC}"
