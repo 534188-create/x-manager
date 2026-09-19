@@ -1238,6 +1238,15 @@ get_csqtt_pass() {
     echo "N/A"
 }
 
+get_csqtt_tunnel_pass() {
+    local db="/etc/csqtt/csqtt.db"
+    if [ -f "$db" ]; then
+        local p=$(python3 -c "import sqlite3; conn=sqlite3.connect('$db'); r=conn.execute(\"SELECT value FROM meta WHERE key='main_password'\").fetchone(); print(r[0] if r else '')" 2>/dev/null || true)
+        [ -n "$p" ] && echo "$p" && return
+    fi
+    echo "N/A"
+}
+
 is_csqtt_web_protected() {
     local port=$(get_csqtt_web_port)
     if [ -f "$CSQTT_LOCK_FILE" ]; then
@@ -1343,6 +1352,7 @@ show_csqtt_tunnel_card() {
     local ssh_p=$(get_ssh_port)
     local u=$(get_csqtt_user)
     local p=$(get_csqtt_pass)
+    local tp=$(get_csqtt_tunnel_pass)
 
     clear
     echo -e "${CYAN}╔══════════════════════════════════════════════════════════════════════╗${NC}"
@@ -1354,6 +1364,7 @@ show_csqtt_tunnel_card() {
     echo -e "  • SSH порт:         ${CYAN}${ssh_p}${NC}"
     echo -e "  • Порт веб-панели:  ${CYAN}${port}/TCP${NC}"
     echo -e "  • VPN порт туннеля: ${CYAN}${peer_p}/UDP${NC}"
+    echo -e "  • Пароль туннеля:   ${GREEN}${tp}${NC}"
     echo -e "  • Текущий статус:   $(get_csqtt_protect_status)"
     echo ""
     echo -e "${BOLD}Учетные данные для авторизации в панели:${NC}"
@@ -1384,18 +1395,54 @@ show_csqtt_tunnel_card() {
     read -p "Нажмите Enter для возврата в меню..."
 }
 
+show_csqtt_credentials() {
+    clear
+    local port=$(get_csqtt_web_port)
+    local peer_p=$(get_csqtt_peer_port)
+    local ssh_p=$(get_ssh_port)
+    local u=$(get_csqtt_user)
+    local p=$(get_csqtt_pass)
+    local tp=$(get_csqtt_tunnel_pass)
+
+    echo -e "${CYAN}╔══════════════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${CYAN}║${BOLD}              РЕКВИЗИТЫ ДОСТУПА И ПАРОЛИ CSQTT                       ${CYAN}║${NC}"
+    echo -e "${CYAN}╚══════════════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    echo -e "${BOLD}🔐 Авторизация в Веб-Панели CSQTT:${NC}"
+    echo -e "  • Прямой URL:            ${CYAN}https://${SERVER_IP}:${port}${NC}"
+    echo -e "  • URL через SSH-туннель: ${CYAN}https://127.0.0.1:${port}${NC}"
+    echo -e "  • Логин администратора:  ${GREEN}${BOLD}${u}${NC}"
+    echo -e "  • Пароль администратора: ${GREEN}${BOLD}${p}${NC}"
+    echo ""
+    echo -e "${BOLD}🛡️ Параметры VPN Туннеля:${NC}"
+    echo -e "  • IP сервера:            ${CYAN}${SERVER_IP}${NC}"
+    echo -e "  • Порт туннеля (UDP):    ${CYAN}${peer_p}/UDP${NC}"
+    echo -e "  • Пароль туннеля:        ${GREEN}${BOLD}${tp}${NC}"
+    echo ""
+    echo -e "${BOLD}ℹ️  Защита веб-панели:${NC} $(get_csqtt_protect_status)"
+    echo ""
+    echo -e "${CYAN}────────────────────────────────────────────────────────────────────────${NC}"
+    echo -e "${YELLOW}Примечание:${NC} Реквизиты извлечены из ${BOLD}/etc/csqtt/csqtt.env${NC} и базы ${BOLD}csqtt.db${NC}."
+    echo -e "Отображаются в режиме чтения (без изменений)."
+    echo -e "${CYAN}────────────────────────────────────────────────────────────────────────${NC}"
+    echo ""
+    read -p "Нажмите Enter для возврата в меню..."
+}
+
 show_csqtt_header() {
     clear
     local port=$(get_csqtt_web_port)
     local peer_p=$(get_csqtt_peer_port)
     local u=$(get_csqtt_user)
+    local p=$(get_csqtt_pass)
+    local tp=$(get_csqtt_tunnel_pass)
     echo -e "${CYAN}╔══════════════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${CYAN}║${BOLD}          УПРАВЛЕНИЕ СЛУЖБОЙ CSQTT И ЗАЩИТОЙ ВЕБ-ПАНЕЛИ             ${CYAN}║${NC}"
     echo -e "${CYAN}╠══════════════════════════════════════════════════════════════════════╣${NC}"
     echo -e "${CYAN}║${NC}  Сервер: ${BOLD}${SERVER_IP}${NC}  |  Статус: $(get_csqtt_status)"
-    echo -e "${CYAN}║${NC}  VPN туннель: ${BOLD}${peer_p}/UDP${NC}  |  Веб-панель: ${BOLD}${port}/TCP${NC}"
-    echo -e "${CYAN}║${NC}  Защита веб-панели: $(get_csqtt_protect_status)"
-    echo -e "${CYAN}║${NC}  Администратор: ${GREEN}${u}${NC}"
+    echo -e "${CYAN}║${NC}  VPN порт: ${BOLD}${peer_p}/UDP${NC}  |  Пароль туннеля: ${GREEN}${tp}${NC}"
+    echo -e "${CYAN}║${NC}  Веб-панель: ${BOLD}${port}/TCP${NC}  |  Защита: $(get_csqtt_protect_status)"
+    echo -e "${CYAN}║${NC}  Вход в панель: Логин: ${GREEN}${u}${NC}  |  Пароль: ${GREEN}${p}${NC}"
     echo -e "${CYAN}╚══════════════════════════════════════════════════════════════════════╝${NC}"
     echo ""
 }
@@ -1421,12 +1468,13 @@ menu_csqtt() {
         echo -e "  ${YELLOW}[1]${NC} 📊 Статус службы csqtt и активные сокеты"
         echo -e "  ${YELLOW}[2]${NC} 🔒 ${BOLD}Включить защиту веб-панели${NC} (Доступ ТОЛЬКО через SSH-туннель)"
         echo -e "  ${YELLOW}[3]${NC} 🔓 ${BOLD}Открыть прямой доступ из интернета${NC} (Доступ без туннеля)"
-        echo -e "  ${YELLOW}[4]${NC} 🔑 ${BOLD}Команда SSH-туннеля и параметры входа${NC} (Инструкция для ПК)"
-        echo -e "  ${YELLOW}[5]${NC} 📜 Живые логи службы csqtt (journalctl)"
-        echo -e "  ${YELLOW}[6]${NC} 🔄 Перезапустить службу csqtt"
+        echo -e "  ${YELLOW}[4]${NC} 🔑 ${BOLD}Команда SSH-туннеля и инструкция для ПК${NC}"
+        echo -e "  ${YELLOW}[5]${NC} 📋 ${BOLD}Показать все реквизиты CSQTT${NC} (Логин, пароль панели и пароль туннеля)"
+        echo -e "  ${YELLOW}[6]${NC} 📜 Живые логи службы csqtt (journalctl)"
+        echo -e "  ${YELLOW}[7]${NC} 🔄 Перезапустить службу csqtt"
         echo -e "  ${YELLOW}[0]${NC} ⬅️  Назад в Главное Меню"
         echo ""
-        read -p "Выберите пункт [0-6]: " c_choice
+        read -p "Выберите пункт [0-7]: " c_choice
         case "$c_choice" in
             1)
                 show_csqtt_header
@@ -1449,9 +1497,12 @@ menu_csqtt() {
                 show_csqtt_tunnel_card
                 ;;
             5)
-                journalctl -u csqtt -f -n 50
+                show_csqtt_credentials
                 ;;
             6)
+                journalctl -u csqtt -f -n 50
+                ;;
+            7)
                 echo -e "${YELLOW}Перезапуск службы csqtt...${NC}"
                 systemctl restart csqtt
                 sleep 2
@@ -2663,7 +2714,8 @@ main_hub() {
         if is_csqtt_installed; then
             echo -e "${CYAN}║${NC}  ${BOLD}[4] 🔒 CSQTT (VPN & Web-панель)${NC}-> $(get_csqtt_status)"
             echo -e "${CYAN}║${NC}      Веб-панель: :${BOLD}$(get_csqtt_web_port)/TCP${NC}   |  Защита: $(get_csqtt_protect_status)"
-            echo -e "${CYAN}║${NC}      VPN порт:   :${BOLD}$(get_csqtt_peer_port)/UDP${NC}"
+            echo -e "${CYAN}║${NC}      VPN порт:   :${BOLD}$(get_csqtt_peer_port)/UDP${NC}   |  Пароль: ${GREEN}$(get_csqtt_tunnel_pass)${NC}"
+            echo -e "${CYAN}║${NC}      Веб-вход:   Логин: ${GREEN}$(get_csqtt_user)${NC}  |  Пароль: ${GREEN}$(get_csqtt_pass)${NC}"
         else
             echo -e "${CYAN}║${NC}  ${BOLD}[4] 🔒 CSQTT (VPN & Web-панель)${NC}-> ${RED}НЕ УСТАНОВЛЕН${NC}"
         fi
@@ -2680,7 +2732,7 @@ main_hub() {
         echo -e "  ${GREEN}${BOLD}[1]${NC} 🚀 ${BOLD}Управление Mieru${NC} (Anti-TSPU, Egress, пользователи, порты)"
         echo -e "  ${BLUE}${BOLD}[2]${NC} ⚡ ${BOLD}Управление Snell v5${NC} (0-RTT, Egress Xray/Direct, HTTP-obfs, PSK)"
         echo -e "  ${PURPLE}${BOLD}[3]${NC} 🛡️  ${BOLD}Управление WDTT / qwdtt${NC} (Egress в ядро / Прямой выход, клиенты)"
-        echo -e "  ${CYAN}${BOLD}[4]${NC} 🔒 ${BOLD}Управление CSQTT${NC} (Защита веб-панели, SSH-туннель, статус)"
+        echo -e "  ${CYAN}${BOLD}[4]${NC} 🔒 ${BOLD}Управление CSQTT${NC} (Защита веб-панели, SSH-туннель, логин/пароли)"
         echo -e "  ${YELLOW}${BOLD}[5]${NC} 🌐 ${BOLD}Управление DNS-туннелями${NC} (MasterDnsVPN / CottenDNS, stormdns://, WAN)"
         echo ""
         echo -e "  ${BOLD}[6]${NC} 📊 Сводный статус всех служб и портов сервера"
