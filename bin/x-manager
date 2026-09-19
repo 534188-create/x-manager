@@ -1470,23 +1470,23 @@ menu_csqtt() {
 # ==============================================================================
 
 get_active_dns_engine() {
-    if systemctl is-active --quiet "$COTTEN_SERVICE" 2>/dev/null; then
-        echo "cottendns"
-    elif systemctl is-active --quiet "$MASTERDNS_SERVICE" 2>/dev/null; then
+    if systemctl is-active --quiet "$MASTERDNS_SERVICE" 2>/dev/null; then
         echo "masterdns"
-    elif is_cottendns_installed; then
+    elif systemctl is-active --quiet "$COTTEN_SERVICE" 2>/dev/null; then
         echo "cottendns"
+    elif is_masterdns_installed; then
+        echo "masterdns"
     else
-        echo "masterdns"
+        echo "cottendns"
     fi
 }
 
 get_dns_engine_name() {
     local eng=$(get_active_dns_engine)
-    if [ "$eng" = "cottendns" ]; then
-        echo "CottenDNS (WhiteDNS Engine)"
+    if [ "$eng" = "masterdns" ]; then
+        echo "MasterDnsVPN (Основной движок)"
     else
-        echo "MasterDnsVPN (Alternative Engine)"
+        echo "CottenDNS (Альтернативный WhiteDNS)"
     fi
 }
 
@@ -1496,8 +1496,8 @@ get_dns_status() {
         return
     fi
     local eng=$(get_active_dns_engine)
-    local s_name="CottenDNS"
-    [ "$eng" = "masterdns" ] && s_name="MasterDnsVPN"
+    local s_name="MasterDnsVPN"
+    [ "$eng" = "cottendns" ] && s_name="CottenDNS"
 
     if systemctl is-active --quiet "$eng" 2>/dev/null; then
         echo -e "${GREEN}АКТИВЕН (${s_name})${NC}"
@@ -1539,8 +1539,8 @@ detect_base_domain() {
 }
 
 get_dns_domain() {
-    local conf="$COTTEN_CONFIG_FILE"
-    [ -f "$conf" ] || conf="$MASTERDNS_CONFIG_FILE"
+    local conf="$MASTERDNS_CONFIG_FILE"
+    [ -f "$conf" ] || conf="$COTTEN_CONFIG_FILE"
     local dom=""
     if [ -f "$conf" ]; then
         dom=$(grep -oP 'DOMAIN\s*=\s*\["\K[^"]+' "$conf" 2>/dev/null | head -n 1 || true)
@@ -1557,8 +1557,8 @@ get_dns_domain() {
 }
 
 get_dns_key() {
-    local kf="$COTTEN_KEY_FILE"
-    [ -f "$kf" ] || kf="$MASTERDNS_KEY_FILE"
+    local kf="$MASTERDNS_KEY_FILE"
+    [ -f "$kf" ] || kf="$COTTEN_KEY_FILE"
     local k=""
     [ -f "$kf" ] && k=$(cat "$kf" 2>/dev/null | tr -d '[:space:]' || true)
     [ -z "$k" ] && k="a7125b5f3cc23e525123c677bc6d202e"
@@ -1566,8 +1566,8 @@ get_dns_key() {
 }
 
 get_dns_routing() {
-    local conf="$COTTEN_CONFIG_FILE"
-    [ -f "$conf" ] || conf="$MASTERDNS_CONFIG_FILE"
+    local conf="$MASTERDNS_CONFIG_FILE"
+    [ -f "$conf" ] || conf="$COTTEN_CONFIG_FILE"
     if grep -qi "USE_EXTERNAL_SOCKS5\s*=\s*true" "$conf" 2>/dev/null; then
         echo -e "${GREEN}Маршрутизация Xray SOCKS5 (127.0.0.1:10808)${NC}"
     else
@@ -2101,18 +2101,21 @@ WantedBy=multi-user.target
 EOF
 
     systemctl daemon-reload
-    systemctl stop masterdns 2>/dev/null || true
-    systemctl disable masterdns 2>/dev/null || true
-
-    systemctl enable cottendns
-    systemctl restart cottendns
     rm -rf "$tmp_dir"
-    sleep 2
 
-    if systemctl is-active --quiet cottendns; then
-        echo -e "${GREEN}✓ CottenDNS успешно установлен и запущен на порту UDP/TCP 53!${NC}"
+    if systemctl is-active --quiet masterdns; then
+        echo -e "${GREEN}✓ CottenDNS успешно установлен как альтернативный скоростной движок.${NC}"
+        echo -e "  Так как сейчас активен MasterDnsVPN (основной), CottenDNS находится в резерве."
+        echo -e "  Вы можете переключить активный движок в пункте [2] меню DNS."
     else
-        echo -e "${RED}✗ Ошибка запуска CottenDNS! Проверьте логи journalctl -u cottendns${NC}"
+        systemctl enable cottendns
+        systemctl restart cottendns
+        sleep 2
+        if systemctl is-active --quiet cottendns; then
+            echo -e "${GREEN}✓ CottenDNS успешно установлен и запущен на порту UDP/TCP 53!${NC}"
+        else
+            echo -e "${RED}✗ Ошибка запуска CottenDNS! Проверьте логи journalctl -u cottendns${NC}"
+        fi
     fi
     sleep 2
 }
@@ -2120,7 +2123,7 @@ EOF
 install_masterdns() {
     clear
     echo -e "${CYAN}╔══════════════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║${BOLD}        УСТАНОВКА MASTERDNSVPN (АЛЬТЕРНАТИВНЫЙ DNS-ТУННЕЛЬ)            ${CYAN}║${NC}"
+    echo -e "${CYAN}║${BOLD}        УСТАНОВКА MASTERDNSVPN (ОСНОВНОЙ DNS-ТУННЕЛЬ)                  ${CYAN}║${NC}"
     echo -e "${CYAN}╚══════════════════════════════════════════════════════════════════════╝${NC}"
     echo ""
     local base_d=$(detect_base_domain)
@@ -2203,7 +2206,7 @@ EOF
 
     cat << EOF > /etc/systemd/system/masterdns.service
 [Unit]
-Description=MasterDnsVPN DNS Tunnel Server (Alternative Engine)
+Description=MasterDnsVPN DNS Tunnel Server (Primary Engine)
 After=network.target xray.service
 Wants=xray.service
 
@@ -2224,19 +2227,17 @@ EOF
     systemctl daemon-reload
     rm -rf "$tmp_dir"
 
-    if systemctl is-active --quiet cottendns; then
-        echo -e "${GREEN}✓ MasterDnsVPN успешно установлен как альтернативный движок.${NC}"
-        echo -e "  Так как сейчас активен CottenDNS, MasterDnsVPN находится в режиме ожидания."
-        echo -e "  Вы можете переключить активный движок в пункте [2] меню."
+    # Stop CottenDNS if it was running to free port 53 for MasterDnsVPN
+    systemctl stop cottendns 2>/dev/null || true
+    systemctl disable cottendns 2>/dev/null || true
+
+    systemctl enable masterdns
+    systemctl restart masterdns
+    sleep 2
+    if systemctl is-active --quiet masterdns; then
+        echo -e "${GREEN}✓ MasterDnsVPN успешно установлен и запущен как основной движок на порту UDP 53!${NC}"
     else
-        systemctl enable masterdns
-        systemctl restart masterdns
-        sleep 2
-        if systemctl is-active --quiet masterdns; then
-            echo -e "${GREEN}✓ MasterDnsVPN успешно установлен и запущен на порту UDP 53!${NC}"
-        else
-            echo -e "${RED}✗ Ошибка запуска MasterDnsVPN! Проверьте логи journalctl -u masterdns${NC}"
-        fi
+        echo -e "${RED}✗ Ошибка запуска MasterDnsVPN! Проверьте логи journalctl -u masterdns${NC}"
     fi
     sleep 2
 }
@@ -2292,18 +2293,18 @@ menu_dns_manage_engines() {
     echo -e "${CYAN}║${BOLD}          УПРАВЛЕНИЕ УСТАНОВКОЙ И УДАЛЕНИЕМ ДВИЖКОВ DNS               ${CYAN}║${NC}"
     echo -e "${CYAN}╚══════════════════════════════════════════════════════════════════════╝${NC}"
     echo ""
-    echo -e "  Статус CottenDNS:   $([ -f "$COTTEN_BIN" ] && echo -e "${GREEN}Установлен${NC}" || echo -e "${RED}Не установлен${NC}")"
     echo -e "  Статус MasterDnsVPN: $([ -f "$MASTERDNS_BIN" ] && echo -e "${GREEN}Установлен${NC}" || echo -e "${RED}Не установлен${NC}")"
+    echo -e "  Статус CottenDNS:    $([ -f "$COTTEN_BIN" ] && echo -e "${GREEN}Установлен${NC}" || echo -e "${RED}Не установлен${NC}")"
     echo ""
-    echo -e "  ${YELLOW}[1]${NC} 🚀 Установить / Обновить CottenDNS (WhiteDNS Engine)"
-    echo -e "  ${YELLOW}[2]${NC} 🛡️  Установить / Обновить MasterDnsVPN (Alternative)"
+    echo -e "  ${YELLOW}[1]${NC} 🛡️  ${BOLD}Установить / Обновить MasterDnsVPN${NC} (Основной движок)"
+    echo -e "  ${YELLOW}[2]${NC} 🚀 Установить / Обновить CottenDNS (Альтернативный WhiteDNS)"
     echo -e "  ${YELLOW}[3]${NC} 🗑️  Удалить DNS-сервисы"
     echo -e "  ${YELLOW}[0]${NC} ⬅️  Назад"
     echo ""
     read -p "Выберите вариант [0-3]: " eng_choice
     case "$eng_choice" in
-        1) install_cottendns ;;
-        2) install_masterdns ;;
+        1) install_masterdns ;;
+        2) install_cottendns ;;
         3) uninstall_dns ;;
         0) return ;;
     esac
@@ -2316,7 +2317,7 @@ show_dns_header() {
     local dom=$(get_dns_domain)
     local key=$(get_dns_key)
     echo -e "${CYAN}╔══════════════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║${BOLD}          УПРАВЛЕНИЕ DNS-ТУННЕЛЯМИ (COTTENDNS / MASTERDNSVPN)         ${CYAN}║${NC}"
+    echo -e "${CYAN}║${BOLD}          УПРАВЛЕНИЕ DNS-ТУННЕЛЯМИ (MASTERDNSVPN / COTTENDNS)         ${CYAN}║${NC}"
     echo -e "${CYAN}╠══════════════════════════════════════════════════════════════════════╣${NC}"
     echo -e "${CYAN}║${NC}  Сервер: ${BOLD}${SERVER_IP}${NC}  |  Статус: $(get_dns_status)"
     echo -e "${CYAN}║${NC}  Активный движок: ${BOLD}${eng_name}${NC}"
@@ -2334,16 +2335,16 @@ menu_dns() {
         echo -e "${YELLOW}║${BOLD}                 DNS-ТУННЕЛИ НЕ ОБНАРУЖЕНЫ                            ${YELLOW}║${NC}"
         echo -e "${YELLOW}╚══════════════════════════════════════════════════════════════════════╝${NC}"
         echo ""
-        echo -e "${RED}Ни CottenDNS, ни MasterDnsVPN не установлены на данном сервере.${NC}"
+        echo -e "${RED}Ни MasterDnsVPN, ни CottenDNS не установлены на данном сервере.${NC}"
         echo ""
-        echo -e "  ${YELLOW}[1]${NC} 🚀 ${BOLD}Установить CottenDNS${NC} (WhiteDNS Official Engine - Рекомендуется)"
-        echo -e "  ${YELLOW}[2]${NC} 🛡️  ${BOLD}Установить MasterDnsVPN${NC} (Альтернативный движок)"
+        echo -e "  ${YELLOW}[1]${NC} 🛡️  ${BOLD}Установить MasterDnsVPN${NC} (Основной движок по умолчанию - Рекомендуется)"
+        echo -e "  ${YELLOW}[2]${NC} 🚀 ${BOLD}Установить CottenDNS${NC} (Альтернативный WhiteDNS Engine)"
         echo -e "  ${YELLOW}[0]${NC} ⬅️  Назад в Главное Меню"
         echo ""
         read -p "Выберите пункт [0-2]: " d_choice
         case "$d_choice" in
-            1) install_cottendns ;;
-            2) install_masterdns ;;
+            1) install_masterdns ;;
+            2) install_cottendns ;;
             *) return ;;
         esac
         return
@@ -2614,11 +2615,11 @@ main_hub() {
         fi
         echo -e "${CYAN}║${NC}"
         if is_dns_installed; then
-            echo -e "${CYAN}║${NC}  ${BOLD}[5] 🌐 DNS-Туннель (WhiteDNS)${NC}  -> $(get_dns_status)"
+            echo -e "${CYAN}║${NC}  ${BOLD}[5] 🌐 DNS-Туннель (MasterDnsVPN)${NC}  -> $(get_dns_status)"
             echo -e "${CYAN}║${NC}      Домен: ${BOLD}$(get_dns_domain)${NC} (:53 UDP/TCP) | WAN: $(get_dns_wan_status)"
             echo -e "${CYAN}║${NC}      Маршрут: $(get_dns_routing)"
         else
-            echo -e "${CYAN}║${NC}  ${BOLD}[5] 🌐 DNS-Туннель (WhiteDNS)${NC}  -> ${RED}НЕ УСТАНОВЛЕН${NC}"
+            echo -e "${CYAN}║${NC}  ${BOLD}[5] 🌐 DNS-Туннель (MasterDnsVPN)${NC}  -> ${RED}НЕ УСТАНОВЛЕН${NC}"
         fi
         echo -e "${CYAN}╚══════════════════════════════════════════════════════════════════════╝${NC}"
         echo ""
@@ -2626,7 +2627,7 @@ main_hub() {
         echo -e "  ${BLUE}${BOLD}[2]${NC} ⚡ ${BOLD}Управление Snell v5${NC} (0-RTT, Egress Xray/Direct, HTTP-obfs, PSK)"
         echo -e "  ${PURPLE}${BOLD}[3]${NC} 🛡️  ${BOLD}Управление WDTT / qwdtt${NC} (Egress в ядро / Прямой выход, клиенты)"
         echo -e "  ${CYAN}${BOLD}[4]${NC} 🔒 ${BOLD}Управление CSQTT${NC} (Защита веб-панели, SSH-туннель, статус)"
-        echo -e "  ${YELLOW}${BOLD}[5]${NC} 🌐 ${BOLD}Управление DNS-туннелями${NC} (CottenDNS / MasterDnsVPN, stormdns://, WAN)"
+        echo -e "  ${YELLOW}${BOLD}[5]${NC} 🌐 ${BOLD}Управление DNS-туннелями${NC} (MasterDnsVPN / CottenDNS, stormdns://, WAN)"
         echo ""
         echo -e "  ${BOLD}[6]${NC} 📊 Сводный статус всех служб и портов сервера"
         echo -e "  ${BOLD}[7]${NC} 🔄 Перезапустить все сервисы (Mieru + Snell + WDTT + CSQTT + DNS)"
